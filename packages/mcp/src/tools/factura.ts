@@ -13,7 +13,9 @@ import {
   facturaBorradorDelete,
   facturaBorradorList,
   facturaBorradorSave,
+  facturaEmitidas,
   facturaEmpresas,
+  facturaPdf,
   facturaPreviewPdf,
   type FacturaBorradorArgs,
   type FormaPago,
@@ -109,6 +111,66 @@ const toArgs = (i: DocInput): FacturaBorradorArgs => ({
 });
 
 export function registerFacturaTools(server: McpServer, runtime: Runtime): void {
+  server.registerTool(
+    'factura_emitidas',
+    {
+      description:
+        'Documentos tributarios ya EMITIDOS por una empresa en el Portal MIPYME (facturas, ' +
+        'notas de crédito/débito, guías…). Sólo lectura: no emite ni firma nada. Expone datos ' +
+        'del RECEPTOR (RUT y razón social), folio y montos — PII de terceros.',
+      inputSchema: {
+        empresa: z.string(),
+        tipoDoc: z.number().int().optional().describe('33, 34, 61, 52, …'),
+        estado: z.enum(['emitido', 'preview']).optional(),
+        folio: z.number().int().positive().optional(),
+        receptor: z.string().optional(),
+        desde: z.string().optional().describe('YYYY-MM-DD'),
+        hasta: z.string().optional().describe('YYYY-MM-DD'),
+        pagina: z.number().int().positive().optional(),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async (input) =>
+      toolText(async () =>
+        JSON.stringify(
+          await facturaEmitidas(runtime, input as Parameters<typeof facturaEmitidas>[1]),
+          null,
+          2,
+        ),
+      ),
+  );
+
+  server.registerTool(
+    'factura_pdf',
+    {
+      description:
+        'Descarga el PDF de un documento ya EMITIDO, por folio. Devuelve la RUTA del archivo, ' +
+        'nunca su contenido: el documento es PII densa (identidad de ambas partes y montos) y ' +
+        'no debe entrar al contexto del modelo. Sólo lectura: no emite ni firma nada.',
+      inputSchema: {
+        empresa: z.string(),
+        folio: z.number().int().positive(),
+        directorio: z
+          .string()
+          .optional()
+          .describe('Carpeta destino; por defecto ~/.sii/documentos/factura.'),
+      },
+      annotations: { readOnlyHint: false },
+    },
+    async ({ empresa, folio, directorio }) =>
+      toolText(async () =>
+        JSON.stringify(
+          await facturaPdf(runtime, {
+            empresa,
+            folio,
+            directorio: directorio ?? join(DOCUMENTOS_DIR, 'factura'),
+          }),
+          null,
+          2,
+        ),
+      ),
+  );
+
   server.registerTool(
     'factura_empresas',
     {
