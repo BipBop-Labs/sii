@@ -192,6 +192,22 @@ Python `sii-cli`, adapted to TypeScript.
   is reached by logging in AS the empresa (logout→login). Confirm reach live before
   wiring each session-keyed surface (F22 confirmed 2026-06-27). `rcv` is the body-RUT
   template, `f22` the session-keyed one.
+- **Three authorization modes, not two (ADR-023).** Besides *body-RUT* (RCV) and
+  *session-keyed* (F22/F29/BHE), a surface can be **empresa-keyed**: the MIPYME facturación
+  portal has its OWN authorized-empresa list (`mipeSelEmpresa.cgi` — the empresas that
+  registered this user as *usuario autorizado*), which is neither the operate pointer's operable
+  set nor the session principal. An empresa-keyed task takes `--empresa`, validates it against
+  the LIVE list, and POSTs the selection before every operation (the choice scopes the form, the
+  borrador CRUD and the listing). `factura` is the template.
+- **Let SII's own client-side validator judge the document, in-page, before POSTing (ADR-023).**
+  Where a legacy form ships a validator (`validaFacEx()` on the MIPYME factura form), run it via
+  `evaluate` with `window.alert` captured and surface its Spanish message VERBATIM. It produces
+  exactly the refusals the server would bounce, so an invalid document never costs a round trip —
+  posting past it was observed to redirect back to the form with the same alert.
+- **A draft is a write, but not a destructive one (ADR-023).** A reversible, legally-inert write
+  (a `borrador`) needs no double-entry confirm and no `destructiveHint` — that ceremony (ADR-017)
+  is for the irreversible step. Gate the DELETE instead: CLI `--confirm <id>` (double-entry of
+  the id) + MCP `destructiveHint` with an explicit `confirmar`.
 - **Pace multi-call fan-outs via `Clock.sleep`.** A task that fires N POSTs (a
   multi-period/-year loop, a folio walk) sleeps `1000/rateLimitRps` ms between
   them through the `Clock` seam (the fake resolves instantly, so tests don't wait)

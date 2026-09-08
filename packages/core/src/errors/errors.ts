@@ -68,3 +68,11 @@ export class PeticionesError extends SiiError {}
  *  clean negative result (`autorizado: false` + SII's verbatim message). Fail loud,
  *  never retry (ADR-004 / ADR-014). */
 export class DteError extends SiiError {}
+
+/** SII rejected a MIPYME factura operation, its own client-side validation refused the
+ *  document (the message is surfaced VERBATIM — ADR-004), or the portal form changed
+ *  shape ("scraper roto"). EMPRESA-KEYED: the working empresa comes from the MIPYME
+ *  authorized list (`mipeSelEmpresa.cgi`), not the operate pointer (ADR-023). Borradores
+ *  only — this surface never signs or emits a DTE. Never retried after a SII error; a
+ *  `LOGIN_HOST` bounce surfaces as `SessionExpiredError`, not this. */
+export class FacturaError extends SiiError {}

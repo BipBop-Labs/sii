@@ -19,6 +19,13 @@ export const HOSTS = {
    *  the SDI-JSON facade. The `.sii.cl` session cookie SSO-carries here (observed
    *  2026-06-30). Session-keyed (`rut_arrastre` = the principal). (#20 / ADR-004) */
   bheCgi: 'https://loa.sii.cl/cgi_IMT',
+  /** MIPYME — the SII's FREE facturación electrónica portal (`Portal001` CGIs). The
+   *  factura form (`mipeGenFacEx.cgi`), the borrador CRUD (`mipeGrabaBorrador.cgi` /
+   *  `mipeEliminaBorrador.cgi`), the preview (`mipeDisplayPreView.cgi`) and the empresa
+   *  chooser (`mipeSelEmpresa.cgi`) all live here. The `.sii.cl` session cookie
+   *  SSO-carries (observed 2026-09-08). EMPRESA-KEYED: the working empresa is chosen by
+   *  POSTing `mipeSelEmpresa.cgi`, not by the operate pointer. (#87 / ADR-023) */
+  mipeCgi: 'https://www1.sii.cl/cgi-bin/Portal001',
   /** SISPAD — peticiones administrativas. A GWT-RPC app: `text/x-gwt-rpc` POST to
    *  `/sispadinternet/peticion` returns a `//OK[…]` object graph; reached via
    *  `PortalSession.requestText` (a cold authenticated POST), NOT the SDI-JSON facade.
