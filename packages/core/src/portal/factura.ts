@@ -31,6 +31,13 @@ const FORM_URL = `${CGI}/mipeGenFacEx.cgi`;
 const GRABA_URL = `${CGI}/mipeGrabaBorrador.cgi`;
 const ELIMINA_URL = `${CGI}/mipeEliminaBorrador.cgi`;
 const PREVIEW_URL = `${CGI}/mipeDisplayPreView.cgi`;
+/** "Ver documentos emitidos" — the listing of DTEs already ISSUED by the selected empresa,
+ *  reached from `mipeLaunchPage.cgi?OPCION=2&TIPO=4` (observed 2026-09-08). Read-only. */
+const EMITIDOS_URL = `${CGI}/mipeAdminDocsEmi.cgi`;
+/** The emitted document's PDF, keyed by the listing row's `CODIGO`. A plain authenticated GET
+ *  answering `application/pdf` — no review/iframe dance, unlike the borrador preview
+ *  (observed 2026-09-08). */
+const EMITIDO_PDF_URL = `${CGI}/mipeDisplayPDF.cgi`;
 /** Renders the (unsigned) document as a real `application/pdf` — the preview the portal embeds
  *  in its `framePdf` iframe. Takes the review page's `PreViewDTE` body (observed 2026-09-08). */
 const PDF_URL = `${CGI}/mipePreView.cgi`;
@@ -112,6 +119,34 @@ export interface FacturaTotales {
   readonly neto: number;
   readonly iva: number;
   readonly total: number;
+}
+
+/** SII's `ESTADO` filter values on the emitted listing (observed in the form's <select>). */
+export const ESTADO_EMITIDO = { emitido: 'EMI', preview: 'PRV' } as const;
+export type EstadoEmitido = keyof typeof ESTADO_EMITIDO;
+
+/** Filters the emitted listing accepts, all optional (observed as query params). */
+export interface FacturaEmitidasFiltro {
+  readonly tipoDoc?: number;
+  readonly estado?: EstadoEmitido;
+  readonly folio?: number;
+  readonly receptor?: string; // `<body>-<dv>`
+  readonly desde?: string; // YYYY-MM-DD
+  readonly hasta?: string; // YYYY-MM-DD
+  readonly pagina?: number;
+}
+
+/** One emitted DTE — CURATED, no `raw` (the row is receptor identity, ADR-004). */
+export interface FacturaEmitida {
+  /** `DHDR_CODIGO` — SII's internal id and the key the PDF is fetched by. */
+  readonly codigo: string;
+  readonly receptorRut: string | null;
+  readonly receptorNombre: string | null;
+  readonly tipoDteDesc: string | null;
+  readonly folio: number | null;
+  readonly fecha: string | null;
+  readonly monto: number | null;
+  readonly estado: string | null;
 }
 
 /** One row of the borradores list — CURATED. */
@@ -268,6 +303,19 @@ export function frameFields(html: string): { name: string; value: string }[] {
     out.push({ name, value: unescapeHtml(/\bvalue="([^"]*)"/i.exec(m[0])?.[1] ?? '') });
   }
   return out;
+}
+
+/** `content-type` says PDF AND the body starts with the `%PDF` magic. Status is never a
+ *  success signal here — SII answers 200 for its own error page (ADR-022). */
+export function isPdfBytes(bytes: Uint8Array, contentType: string | null): boolean {
+  return (
+    (contentType ?? '').toLowerCase().includes('application/pdf') &&
+    bytes.length > 4 &&
+    bytes[0] === 0x25 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x44 &&
+    bytes[3] === 0x46
+  );
 }
 
 /** Also relay SII's generic failure page ("Error al contribuyente"), which carries a support
@@ -757,6 +805,103 @@ export async function fetchBorradores(session: PortalSession): Promise<FacturaBo
   });
 }
 
+/** Strip tags from one HTML cell and normalise whitespace. */
+const cellText = (html: string): string =>
+  unescapeHtml(html.replace(/<[^>]*>/g, ' '))
+    .replace(/\s+/g, ' ')
+    .trim();
+
+/** Parse the emitted-documents table. The markup is MALFORMED — SII leaves the receptor cell
+ *  unclosed (`<td>64000001-5 <td>NOMBRE</td>`, observed 2026-09-08) — so rows are split on the
+ *  `mipeGesDocEmi.cgi?...CODIGO=` anchor and cells on `<td`, never with a strict parser. */
+export function parseEmitidas(html: string): FacturaEmitida[] {
+  const out: FacturaEmitida[] = [];
+  const re = /<a[^>]*mipeGesDocEmi\.cgi\?[^"']*CODIGO=(\d+)[^>]*>[\s\S]*?<\/tr>/gi;
+  for (let m = re.exec(html); m; m = re.exec(html)) {
+    const codigo = m[1];
+    if (!codigo) continue;
+    // cells AFTER the "Ver" cell that holds the anchor
+    const cells = m[0]
+      .split(/<td[^>]*>/i)
+      .slice(1)
+      .map(cellText)
+      .filter((c) => c !== '');
+    const num = (v: string | undefined): number | null => {
+      const d = (v ?? '').replace(/[^\d-]/g, '');
+      return d === '' ? null : Number(d);
+    };
+    out.push({
+      codigo,
+      receptorRut: cells[0] ?? null,
+      receptorNombre: cells[1] ?? null,
+      tipoDteDesc: cells[2] ?? null,
+      folio: num(cells[3]),
+      fecha: cells[4] ?? null,
+      monto: num(cells[5]),
+      estado: cells[6] ?? null,
+    });
+  }
+  return out;
+}
+
+/** The DTEs already emitted by the selected empresa. Read-only: this touches nothing and
+ *  cannot issue a document (ADR-023). Every filter is optional; SII takes them as query
+ *  params and answers ISO-8859-1 HTML (observed 2026-09-08). */
+export async function fetchEmitidas(
+  session: PortalSession,
+  filtro: FacturaEmitidasFiltro = {},
+): Promise<FacturaEmitida[]> {
+  const q = new URLSearchParams({
+    RUT_RECP: filtro.receptor ?? '',
+    FOLIO: filtro.folio === undefined ? '' : String(filtro.folio),
+    RZN_SOC: '',
+    FEC_DESDE: filtro.desde ?? '',
+    FEC_HASTA: filtro.hasta ?? '',
+    TPO_DOC: filtro.tipoDoc === undefined ? '' : String(filtro.tipoDoc),
+    ESTADO: filtro.estado ? ESTADO_EMITIDO[filtro.estado] : '',
+    ORDEN: '',
+    NUM_PAG: String(filtro.pagina ?? 1),
+  });
+  const res = await session.requestForm(`${EMITIDOS_URL}?${q.toString()}`, { method: 'GET' });
+  const rejection = serverAlert(res.body);
+  if (rejection) throw new FacturaError(`El SII rechazó la consulta: ${rejection}`);
+  if (
+    !/mipeGesDocEmi\.cgi/i.test(res.body) &&
+    !/Documentos Emitidos|No se encontraron/i.test(res.body)
+  ) {
+    throw new FacturaError(
+      'El SII no entregó el listado de documentos emitidos (mipeAdminDocsEmi.cgi). ' +
+        'Puede que la sesión ya no esté viva o que el portal haya cambiado.',
+    );
+  }
+  return parseEmitidas(res.body);
+}
+
+/** The PDF of an ALREADY EMITTED document, by its listing `codigo` (`DHDR_CODIGO`). A plain
+ *  authenticated GET — far simpler than the borrador preview, which needs the review page and
+ *  the iframe's own form. Success is decided by `content-type` + `%PDF` magic, NEVER by HTTP
+ *  status: SII answers 200 for its error page and for the login-wall bounce too (ADR-022). */
+export async function fetchEmitidaPdf(session: PortalSession, codigo: string): Promise<Uint8Array> {
+  const res = await session.requestBinary(
+    `${EMITIDO_PDF_URL}?DHDR_CODIGO=${encodeURIComponent(codigo)}`,
+    {
+      method: 'GET',
+      headers: {
+        Referer: `${CGI}/mipeGesDocEmi.cgi?ALL_PAGE_ANT=2&CODIGO=${encodeURIComponent(codigo)}`,
+      },
+    },
+  );
+  if (!isPdfBytes(res.bytes, res.contentType)) {
+    const sii = contribuyenteError(res.bytes, res.contentType);
+    throw new FacturaError(
+      sii
+        ? `El SII no entregó el documento emitido: ${sii}`
+        : `El SII no devolvió un PDF del documento emitido (content-type: ${res.contentType ?? 'desconocido'}).`,
+    );
+  }
+  return res.bytes;
+}
+
 /** Fetch the PREVIEW PDF of a filled (unsigned) document — the "Validar y visualizar" path.
  *
  *  TWO hops, both first-hand-observed 2026-09-08:
@@ -828,14 +973,7 @@ export async function fetchPreviewPdf(
     },
     body,
   });
-  const isPdf =
-    (res.contentType ?? '').toLowerCase().includes('application/pdf') &&
-    res.bytes.length > 4 &&
-    res.bytes[0] === 0x25 && // %
-    res.bytes[1] === 0x50 && // P
-    res.bytes[2] === 0x44 && // D
-    res.bytes[3] === 0x46; // F
-  if (!isPdf) {
+  if (!isPdfBytes(res.bytes, res.contentType)) {
     // Relay SII's own message when it gave one (ADR-004) instead of a bare content-type.
     const sii = contribuyenteError(res.bytes, res.contentType);
     throw new FacturaError(

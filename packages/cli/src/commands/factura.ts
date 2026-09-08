@@ -14,12 +14,15 @@ import {
   facturaBorradorDelete,
   facturaBorradorList,
   facturaBorradorSave,
+  facturaEmitidas,
   facturaEmpresas,
+  facturaPdf,
   facturaPreviewPdf,
   formatMoney as money,
   formatRut as fmtRut,
   type FacturaBorradorArgs,
   type FacturaItem,
+  type EstadoEmitido,
   type FacturaSelectAviso,
   type FormaPago,
   type Runtime,
@@ -260,6 +263,84 @@ export function registerFactura(program: Command, runtime: Runtime): void {
       emit(res, () =>
         out(`Borrador ${res.borradorId} (DTE ${res.tipoDte}) eliminado de ${res.empresa.rut}.`),
       );
+    });
+
+  factura
+    .command('emitidas')
+    .description('Documentos ya EMITIDOS por la empresa (sólo lectura; no emite nada).')
+    .requiredOption('--empresa <rut>', 'RUT de la empresa emisora.')
+    .option('--tipo-doc <n>', 'Filtra por tipo de DTE (33, 34, 61, 52, …).', parseTipo)
+    .option('--estado <estado>', 'emitido | preview.')
+    .option('--folio <n>', 'Filtra por folio.', parseTipo)
+    .option('--receptor <rut>', 'Filtra por RUT receptor.')
+    .option('--desde <YYYY-MM-DD>', 'Fecha de emisión desde.')
+    .option('--hasta <YYYY-MM-DD>', 'Fecha de emisión hasta.')
+    .option('--pagina <n>', 'Página del listado (por defecto 1).', parseTipo)
+    .action(
+      async (opts: {
+        empresa: string;
+        tipoDoc?: number;
+        estado?: string;
+        folio?: number;
+        receptor?: string;
+        desde?: string;
+        hasta?: string;
+        pagina?: number;
+      }) => {
+        if (opts.estado !== undefined && !['emitido', 'preview'].includes(opts.estado)) {
+          throw new Error(`--estado inválido: "${opts.estado}" (emitido | preview).`);
+        }
+        const res = await facturaEmitidas(runtime, {
+          empresa: opts.empresa,
+          ...(opts.tipoDoc !== undefined ? { tipoDoc: opts.tipoDoc } : {}),
+          ...(opts.estado !== undefined ? { estado: opts.estado as EstadoEmitido } : {}),
+          ...(opts.folio !== undefined ? { folio: opts.folio } : {}),
+          ...(opts.receptor !== undefined ? { receptor: opts.receptor } : {}),
+          ...(opts.desde !== undefined ? { desde: opts.desde } : {}),
+          ...(opts.hasta !== undefined ? { hasta: opts.hasta } : {}),
+          ...(opts.pagina !== undefined ? { pagina: opts.pagina } : {}),
+        });
+        emit(res, () => {
+          out(`Documentos emitidos de ${res.empresa.rut} — ${res.empresa.nombre}`);
+          if (res.documentos.length === 0) {
+            out('Sin documentos emitidos para ese filtro.');
+            return;
+          }
+          for (const d of res.documentos) {
+            out(
+              `  folio=${d.folio ?? '—'}  ${d.fecha ?? '—'}  ` +
+                `${d.receptorRut ? fmtRut(d.receptorRut) : '—'}  ${d.receptorNombre ?? ''}  ` +
+                `${d.tipoDteDesc ?? ''}  ${money(d.monto)}  [${d.estado ?? '—'}]`,
+            );
+          }
+          out(`${res.documentos.length} documento(s).`);
+        });
+      },
+    );
+
+  factura
+    .command('pdf')
+    .description('Descarga el PDF de un documento ya EMITIDO, por folio.')
+    .argument('<folio>', 'Folio del documento emitido.')
+    .requiredOption('--empresa <rut>', 'RUT de la empresa emisora.')
+    .option('--out <dir>', 'Carpeta destino.', join(DOCUMENTOS_DIR, 'factura'))
+    .action(async (folio: string, opts: { empresa: string; out: string }) => {
+      const n = Number(folio);
+      if (!Number.isInteger(n) || n <= 0) {
+        throw new Error(`Folio inválido: "${folio}" (entero positivo).`);
+      }
+      const res = await facturaPdf(runtime, {
+        empresa: opts.empresa,
+        folio: n,
+        directorio: opts.out,
+      });
+      emit(res, () => {
+        out(
+          `Factura folio ${res.documento.folio} — ${res.documento.receptorNombre ?? ''} ` +
+            `(${res.documento.estado ?? '—'})`,
+        );
+        out(`  ${res.path} (${res.bytes} bytes)`);
+      });
     });
 
   factura

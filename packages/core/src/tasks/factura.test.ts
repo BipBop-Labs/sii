@@ -13,6 +13,8 @@ import { ValidationError } from '../errors/index.js';
 import { initOperateState } from '../identity/index.js';
 import { writeSession } from '../auth/index.js';
 import {
+  facturaEmitidas,
+  facturaPdf,
   facturaBorradorDelete,
   facturaBorradorList,
   facturaBorradorSave,
@@ -29,6 +31,11 @@ const EMPRESAS_HTML =
 const OK_BORRADOR = 'Su documento borrador ha sido grabado/actualizado con éxito';
 const REVIEW = '<form name="PreViewDTE"><input type="hidden" name="PTDC_CODIGO" value="33"></form>';
 const PDF = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);
+const EMITIDAS_HTML =
+  '<table><tr><td><a href="/cgi-bin/Portal001/mipeGesDocEmi.cgi?ALL_PAGE_ANT=2&CODIGO=99001">' +
+  '<img src="x"></a></td><td>64000001-5 <td>CLIENTE DE PRUEBA SPA</td>' +
+  '<td>Factura Electronica</td><td>7</td><td>2026-09-08</td><td>1190000</td>' +
+  '<td>Documento Emitido</td></tr></table>';
 
 const DOC = {
   empresa: EMPRESA,
@@ -52,6 +59,7 @@ function sessionScript(borradores: unknown[] = []) {
     requestForm: (url: string) => {
       if (url.includes('mipeSelEmpresa.cgi?')) return EMPRESAS_HTML;
       if (url.includes('mipeSelEmpresa.cgi')) return '<html>formulario</html>';
+      if (url.includes('mipeAdminDocsEmi.cgi')) return EMITIDAS_HTML;
       if (url.includes('PreViewFrame'))
         return '<form name="VIEW"><input type="hidden" name="PTDC_CODIGO" value=""></form>';
       return '';
@@ -237,5 +245,60 @@ describe('factura tasks (fakes, no SII)', () => {
         facturaBorradorDelete(noSession(), { empresa: EMPRESA, borradorId: 'abc' }),
       ).rejects.toBeInstanceOf(ValidationError);
     });
+  });
+});
+
+describe('documentos emitidos (#91)', () => {
+  it('lists emitted documents and audits count only (no PII)', async () => {
+    const rt = makeRuntime();
+    await seed(rt);
+    const res = await facturaEmitidas(rt, { empresa: EMPRESA });
+    expect(res.documentos).toHaveLength(1);
+    expect(res.documentos[0]).toMatchObject({ folio: 7, codigo: '99001' });
+    const a = entries(rt).at(-1)!;
+    expect(a).toMatchObject({ action: 'factura_emitidas', result: 'ok', count: 1 });
+    expect(JSON.stringify(a)).not.toContain('CLIENTE DE PRUEBA');
+  });
+
+  it('validates a receptor RUT and the dates BEFORE opening a session', async () => {
+    const noSession: Runtime = {
+      clock: new FixedClock(new Date('2026-09-08T12:00:00Z')),
+      audit: new RecordingAuditSink(),
+      store: new InMemoryKeyValueStore(),
+      portal: new FakePortalDriver({}),
+    };
+    await expect(
+      facturaEmitidas(noSession, { empresa: EMPRESA, receptor: '64000001-9' }),
+    ).rejects.toBeInstanceOf(ValidationError);
+    await expect(
+      facturaEmitidas(noSession, { empresa: EMPRESA, desde: '08-09-2026' }),
+    ).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it('downloads by folio and returns a DESCRIPTOR, never the bytes', async () => {
+    const rt = makeRuntime();
+    await seed(rt);
+    const res = await facturaPdf(rt, { empresa: EMPRESA, folio: 7, directorio: '/tmp/docs' });
+    expect(res).toMatchObject({ bytes: PDF.length, contentType: 'application/pdf' });
+    expect(res.archivo).toBe('factura-7-76192083-9-2026-09-08.pdf');
+    expect(rt.written).toEqual(['/tmp/docs/factura-7-76192083-9-2026-09-08.pdf']);
+    expect(JSON.stringify(res)).not.toContain('%PDF');
+    expect(entries(rt).at(-1)).toMatchObject({ action: 'factura_pdf', result: 'ok', folio: 7 });
+  });
+
+  it('fails clearly when the folio is not in the listing', async () => {
+    const rt = makeRuntime();
+    await seed(rt);
+    await expect(
+      facturaPdf(rt, { empresa: EMPRESA, folio: 999, directorio: '/tmp/docs' }),
+    ).rejects.toThrow(/No se encontró un documento emitido con folio 999/);
+  });
+
+  it('requires a folio or a codigo', async () => {
+    const rt = makeRuntime();
+    await seed(rt);
+    await expect(
+      facturaPdf(rt, { empresa: EMPRESA, directorio: '/tmp/docs' }),
+    ).rejects.toBeInstanceOf(ValidationError);
   });
 });

@@ -7,6 +7,9 @@ import { FacturaError } from '../errors/index.js';
 import { Rut } from '../rut/index.js';
 import {
   eliminaBorrador,
+  fetchEmitidaPdf,
+  fetchEmitidas,
+  parseEmitidas,
   fetchBorradores,
   fetchEmpresas,
   fetchPreviewPdf,
@@ -452,5 +455,83 @@ describe('regressions (live 2026-09-08)', () => {
       .replace(/\/\/.*$/gm, '');
     expect(code).not.toContain('mipeGenXMLFirma');
     expect(code).not.toContain('Firma');
+  });
+});
+
+// --- Documentos emitidos (#91) ------------------------------------------------------
+describe('documentos emitidos', () => {
+  // SII leaves the receptor cell UNCLOSED — `<td>RUT <td>NOMBRE</td>` (observed 2026-09-08).
+  const LISTA = `<table><tr><td>Ver</td><td>Receptor</td></tr>
+    <tr> <td> <a href="/cgi-bin/Portal001/mipeGesDocEmi.cgi?ALL_PAGE_ANT=2&CODIGO=99000001"><img src="/Portal001/button_edit.gif"></a></td>
+      <td>76192083-9 <td>ACME REPUESTOS SPA</td> <td>Factura Electronica</td> <td>5</td>
+      <td>2026-09-08</td> <td>990000</td> <td>Documento Emitido</td> </tr>
+    <tr> <td> <a href="/cgi-bin/Portal001/mipeGesDocEmi.cgi?ALL_PAGE_ANT=2&CODIGO=99000002"><img src="/Portal001/button_edit.gif"></a></td>
+      <td>77111222-6 <td>TALLER DEL SUR LTDA</td> <td>Factura Electronica</td> <td>1</td>
+      <td>2026-09-07</td> <td>1190000</td> <td>Documento Emitido</td> </tr></table>`;
+
+  it('parses the malformed table into curated rows (no raw)', () => {
+    const rows = parseEmitidas(LISTA);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toEqual({
+      codigo: '99000001',
+      receptorRut: '76192083-9',
+      receptorNombre: 'ACME REPUESTOS SPA',
+      tipoDteDesc: 'Factura Electronica',
+      folio: 5,
+      fecha: '2026-09-08',
+      monto: 990000,
+      estado: 'Documento Emitido',
+    });
+    expect(Object.keys(rows[1] ?? {})).not.toContain('raw');
+  });
+
+  it('sends every filter as a query param and treats an empty result as zero rows', async () => {
+    const s = new FakePortalSession({
+      requestForm: () => '<html>No se encontraron documentos</html>',
+    });
+    await expect(
+      fetchEmitidas(s, { tipoDoc: 61, estado: 'emitido', folio: 7, desde: '2026-01-01' }),
+    ).resolves.toEqual([]);
+    const url = s.lastFormRequest?.url ?? '';
+    expect(url).toContain('TPO_DOC=61');
+    expect(url).toContain('ESTADO=EMI');
+    expect(url).toContain('FOLIO=7');
+    expect(url).toContain('FEC_DESDE=2026-01-01');
+    expect(url).toContain('NUM_PAG=1');
+  });
+
+  it('fails loudly when the listing changes shape (scraper roto)', async () => {
+    const s = new FakePortalSession({ requestForm: () => '<html>mantención</html>' });
+    await expect(fetchEmitidas(s)).rejects.toBeInstanceOf(FacturaError);
+  });
+
+  it('relays a SII rejection page verbatim', async () => {
+    const s = new FakePortalSession({
+      requestForm: () =>
+        "<html><title>Redireccionando</title><script>alert('Sesión no válida');window.history.go(-1);</script></html>",
+    });
+    await expect(fetchEmitidas(s)).rejects.toThrow(/Sesión no válida/);
+  });
+
+  it('downloads the emitted PDF by codigo with the detail page as Referer', async () => {
+    const PDF = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);
+    const s = new FakePortalSession({ requestBinary: () => PDF });
+    await expect(fetchEmitidaPdf(s, '99000002')).resolves.toEqual(PDF);
+    expect(s.lastBinaryRequest?.url).toContain('mipeDisplayPDF.cgi?DHDR_CODIGO=99000002');
+    expect(s.lastBinaryRequest?.options?.method).toBe('GET');
+    expect(s.lastBinaryRequest?.options?.headers?.['Referer']).toContain('mipeGesDocEmi.cgi');
+  });
+
+  it('rejects a 200 HTML error page instead of a PDF (ADR-022: never trust status)', async () => {
+    const s = new FakePortalSession({
+      requestBinary: () => ({
+        status: 200,
+        contentType: 'text/html',
+        bytes: new TextEncoder().encode('<html><title>Error al contribuyente</title></html>'),
+      }),
+    });
+    await expect(fetchEmitidaPdf(s, '1')).rejects.toThrow(
+      /no entregó el documento|no devolvió un PDF/,
+    );
   });
 });
