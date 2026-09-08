@@ -1,9 +1,11 @@
 # ADR-023 — Factura electrónica (Portal MIPYME): borradores only, no emission
 
-- **Status:** Accepted
-- **Date:** 2026-09-08
-- **Supersedes / relates to:** ADR-003 (seams), ADR-004 (guardrails), ADR-005 (identity),
-  ADR-006 (secrets/PII), ADR-017 (write posture), ADR-022 (document downloads)
+## Status
+
+Accepted — 2026-09-08.
+
+Relates to: ADR-003 (seams), ADR-004 (guardrails), ADR-005 (identity),
+ADR-006 (secrets/PII), ADR-017 (write posture), ADR-022 (document downloads).
 
 ## Context
 
@@ -77,6 +79,55 @@ HTTP status. No new seam was needed.
 A factura is both parties' identity end to end. Rows are curated; the audit receipt carries only
 the empresa RUT, the borrador id, the DTE type and counts — never the receptor, the montos or the
 item glosas (ADR-006).
+
+## Alternatives Considered
+
+### 1. Ship emission behind the ADR-017 write ceremony — REJECTED
+
+`bte emit` already has a posture for irreversible writes: a non-mutating preview split from
+the issue step, an explicit `--confirm <echo>` double-entry of a load-bearing value, and
+`destructiveHint` on the MCP tool. The obvious move is to reuse it for `factura emit`.
+
+It is not sufficient here, for two reasons.
+
+**ADR-017's gate protects against a mistake, not against an instruction.** A double-entry echo
+stops a human fat-fingering an amount. It does not stop a model that has been told, by content
+it read, to issue a document — the model can supply the echo as readily as the amount, because
+both are just arguments it is choosing. The MIPYME surface is reached with data the taxpayer
+does not control: receptor names, giros and addresses come back from SII's registry, and a
+factura's own item glosas are free text. That is a prompt-injection surface on the *inputs* of
+the very operation being gated.
+
+**A factura binds a third party.** A BHE is the issuer's own income declaration, and it can be
+annulled (`bte anular`, #63). A factura creates a tax obligation for the *receptor* — it enters
+their Registro de Compras, affects their IVA position, and cannot simply be withdrawn; it is
+undone by issuing a nota de crédito, itself another binding document. The blast radius is
+someone who never interacted with this tool.
+
+Those two together move the decision out of "add more ceremony" and into "do not automate the
+step at all".
+
+### 2. Don't ship the MIPYME surface at all — REJECTED
+
+If emission is out, one could argue the rest is not worth the wire-contract surface area.
+
+But the borrador half is where the repetitive work actually is: composing a document, checking
+the receptor's registry data, reviewing totals, and doing that for many clients in a batch.
+All of it is reversible and legally inert — a borrador has no folio and is not a tax document.
+The one consequential click then stays with a human in SII's own UI, one navigation away from
+any borrador this tool writes. That is a good split: the tedium is automated, the legal act is
+not.
+
+### 3. Automate emission but require a certificado digital — REJECTED, non-option
+
+The DTE SOAP services need a `.pfx`, which is a natural second factor: no certificate, no
+emission. It would have been reasonable to gate `factura emit` the same way.
+
+The live capture removed the option. The MIPYME portal **signs server-side**
+(`mipeGenXMLFirma.cgi`): there is no applet, no browser certificate, no `.pfx` anywhere in the
+flow. A Clave Tributaria session alone is sufficient. There is therefore no certificate to
+require, and nothing to gate on — which is precisely why the boundary has to be drawn by
+choosing not to call that CGI.
 
 ## Consequences
 

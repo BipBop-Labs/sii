@@ -8,11 +8,14 @@ import {
   InMemoryKeyValueStore,
   RecordingAuditSink,
 } from '../adapters/fake/index.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type { FileSink, Runtime } from '../seams/index.js';
-import { ValidationError } from '../errors/index.js';
+import { FacturaError, ValidationError } from '../errors/index.js';
 import { initOperateState } from '../identity/index.js';
 import { writeSession } from '../auth/index.js';
 import {
+  facturaEmpresas,
   facturaBorradorDelete,
   facturaBorradorList,
   facturaBorradorSave,
@@ -237,5 +240,63 @@ describe('factura tasks (fakes, no SII)', () => {
         facturaBorradorDelete(noSession(), { empresa: EMPRESA, borradorId: 'abc' }),
       ).rejects.toBeInstanceOf(ValidationError);
     });
+  });
+});
+
+describe('retry policy (CONVENTIONS: never retry after a SII block)', () => {
+  class Timeout extends Error {
+    override name = 'TimeoutError';
+  }
+  const runtimeWith = (fail: () => never, calls: { n: number }): Runtime => ({
+    clock: new FixedClock(new Date('2026-09-08T12:00:00Z')),
+    audit: new RecordingAuditSink(),
+    store: new InMemoryKeyValueStore(),
+    portal: new FakePortalDriver({
+      restoreSession: {
+        requestForm: (url: string) => {
+          if (url.includes('mipeSelEmpresa.cgi?')) {
+            calls.n += 1;
+            fail();
+          }
+          return '';
+        },
+      },
+    }),
+  });
+
+  it('does NOT retry a 429 / rate-limit answered by SII', async () => {
+    const calls = { n: 0 };
+    const rt = runtimeWith(() => {
+      throw new FacturaError('429 Too Many Requests');
+    }, calls);
+    await seed(rt);
+    await expect(facturaEmpresas(rt, {})).rejects.toThrow(/429/);
+    expect(calls.n).toBe(1); // one attempt only — a block is never retried
+  });
+
+  it('does NOT retry a message that merely contains a 5xx-looking number', async () => {
+    const calls = { n: 0 };
+    const rt = runtimeWith(() => {
+      throw new Error('El folio 512 no existe');
+    }, calls);
+    await seed(rt);
+    await expect(facturaEmpresas(rt, {})).rejects.toThrow(/folio 512/);
+    expect(calls.n).toBe(1);
+  });
+
+  it('DOES retry a genuine transport timeout, at most twice', async () => {
+    const calls = { n: 0 };
+    const rt = runtimeWith(() => {
+      throw new Timeout('apiRequestContext.fetch: Timeout 30000ms exceeded.');
+    }, calls);
+    await seed(rt);
+    await expect(facturaEmpresas(rt, {})).rejects.toThrow(/Timeout/);
+    expect(calls.n).toBe(3); // initial + 2 retries
+  });
+
+  it('uses the Clock for jitter, so the core stays deterministic', () => {
+    const src = readFileSync(fileURLToPath(new URL('./factura.ts', import.meta.url)), 'utf8');
+    expect(src).not.toContain('Math.random');
+    expect(src).toContain('runtime.clock.now().getTime() % 250');
   });
 });

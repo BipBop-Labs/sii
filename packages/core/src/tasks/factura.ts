@@ -14,7 +14,7 @@
 import { withSession } from '../auth/index.js';
 import { recordAudit } from '../audit/index.js';
 import { Rut } from '../rut/index.js';
-import { FacturaError, ValidationError } from '../errors/index.js';
+import { FacturaError, SiiError, ValidationError } from '../errors/index.js';
 import { DEFAULT_SETTINGS } from '../config/index.js';
 import {
   FORMA_PAGO,
@@ -60,10 +60,30 @@ export { TIPOS_DTE, MAX_ITEMS } from '../portal/factura.js';
 const PACE_MS = 1000;
 const pacingMs = (): number => Math.max(PACE_MS, Math.round(1000 / DEFAULT_SETTINGS.rateLimitRps));
 
-/** Retry a READ-ONLY call at most twice, and ONLY on a transient transport failure — a timeout,
- *  a 429 or a 5xx. Never on a validation error, an unexpected HTML body, or anything that
- *  writes: those are surfaced immediately (ADR-004). Backoff is exponential with jitter so
- *  concurrent callers do not resonate. */
+/** A transport failure that never reached SII's application layer — the connection timed out or
+ *  was reset. Deliberately NOT status-derived:
+ *
+ *  * **429 is excluded.** CONVENTIONS is explicit — "Never retry after a SII rate-limit / block.
+ *    It is server-side and timed; surface the message verbatim and stop." A 429 IS that signal,
+ *    so retrying it is the forbidden behaviour, not an exception this module gets to make.
+ *  * **5xx is excluded too**, because at this layer there is no status code to key off: the
+ *    seams surface transport failures as `Error`, and sniffing `\b5\d{2}\b` out of prose would
+ *    retry any message that happens to contain a three-digit number. Matching on prose is
+ *    fragile, so the check keys off Playwright's structured `TimeoutError` name plus the two
+ *    connection-level codes Node puts in `message`.
+ *
+ *  Anything that reached SII — a business rejection, a validation failure, an unexpected HTML
+ *  body, a dead session — is surfaced immediately (ADR-004). */
+function isTransportFailure(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  if (e instanceof SiiError) return false; // reached SII: never retried
+  return e.name === 'TimeoutError' || /ECONNRESET|ECONNREFUSED|socket hang up/i.test(e.message);
+}
+
+/** Retry a READ-ONLY call at most twice, and ONLY on a transport failure (above). Never on a
+ *  write, a validation error, or anything SII answered. Backoff is exponential with jitter so
+ *  concurrent callers do not resonate; the jitter is derived from the `Clock` seam rather than
+ *  a nondeterministic source, so the core stays deterministic under a fake clock (ADR-003). */
 async function readOnlyRetry<T>(runtime: Runtime, fn: () => Promise<T>): Promise<T> {
   let lastError: unknown;
   for (let attempt = 0; attempt <= 2; attempt += 1) {
@@ -71,11 +91,9 @@ async function readOnlyRetry<T>(runtime: Runtime, fn: () => Promise<T>): Promise
       return await fn();
     } catch (e) {
       lastError = e;
-      const msg = e instanceof Error ? e.message : String(e);
-      const transient = /timeout|ETIMEDOUT|ECONNRESET|socket hang up|\b(?:429|5\d{2})\b/i.test(msg);
-      // A SII business/validation failure or a dead session is NOT transient — fail now.
-      if (!transient || e instanceof FacturaError || attempt === 2) throw e;
-      await runtime.clock.sleep(PACE_MS * 2 ** attempt + Math.floor(Math.random() * 250));
+      if (!isTransportFailure(e) || attempt === 2) throw e;
+      const jitter = runtime.clock.now().getTime() % 250;
+      await runtime.clock.sleep(PACE_MS * 2 ** attempt + jitter);
     }
   }
   throw lastError;
@@ -216,8 +234,11 @@ export async function facturaEmpresas(
 ): Promise<FacturaEmpresa[]> {
   const tipoDte = assertTipo(args.tipoDte);
   try {
-    const res = await readOnlyRetry(runtime, () =>
-      withSession(runtime, (session) => fetchEmpresas(session, tipoDte)),
+    // The retry wraps the READ only. Wrapping `withSession` would tear down and rebuild the
+    // browser context on every attempt — and, worse, replay `mipeSelEmpresa.cgi`, which is
+    // server-side session state, not a read.
+    const res = await withSession(runtime, (session) =>
+      readOnlyRetry(runtime, () => fetchEmpresas(session, tipoDte)),
     );
     audit(runtime, 'factura_empresas', 'ok', { count: res.length });
     return res;
@@ -236,15 +257,17 @@ export async function facturaBorradorList(
   const tipoDte = assertTipo(args.tipoDte);
   const start = runtime.clock.now().getTime();
   try {
-    const res = await readOnlyRetry(runtime, () =>
-      withSession(runtime, async (session) => {
-        const emp = await resolveAndSelectEmpresa(session, empresa, tipoDte, () =>
-          runtime.clock.sleep(pacingMs()),
-        );
-        await runtime.clock.sleep(pacingMs());
-        return { empresa: emp, borradores: await fetchBorradores(session) };
-      }),
-    );
+    const res = await withSession(runtime, async (session) => {
+      const emp = await resolveAndSelectEmpresa(session, empresa, tipoDte, () =>
+        runtime.clock.sleep(pacingMs()),
+      );
+      await runtime.clock.sleep(pacingMs());
+      // retry the READ only — never the empresa selection, which mutates session state
+      return {
+        empresa: emp,
+        borradores: await readOnlyRetry(runtime, () => fetchBorradores(session)),
+      };
+    });
     audit(runtime, 'factura_borrador_list', 'ok', {
       rut: empresa.canonical,
       count: res.borradores.length,

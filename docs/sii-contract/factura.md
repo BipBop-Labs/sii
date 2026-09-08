@@ -133,6 +133,13 @@ envelope, so no zod envelope parse applies. Each row carries ~250 form columns, 
 
 Scoped to the empresa selected in step 1. Max 100 borradores (stated on the page).
 
+**The text is DOUBLE-ENCODED.** The response declares `charset=ISO-8859-1` but carries UTF-8
+bytes of an already-mojibaked string: `Á` arrives as `C3 83 C2 81`, i.e. the UTF-8 encoding of
+(`Ã`, U+0081). A *correct* UTF-8 decode therefore still yields `CorporaciÃ³n` / `VicuÃ±a`
+(observed 2026-09-08). Undo the extra layer by re-encoding the decoded string as Latin-1 and
+decoding it as UTF-8 again — guarded, so legitimately-accented text is left alone. This affects
+DISPLAY only; nothing sent to SII changes.
+
 Related endpoints on the same service: `rutEmpresa` (current empresa), `getProperty/<key>`.
 
 ## 5. Preview PDF — "Validar y visualizar"
@@ -160,6 +167,58 @@ The hidden inputs are uniform and double-quoted:
 ```
 
 Success is decided by `content-type` + the `%PDF` magic, never by HTTP status (ADR-022).
+
+## 5b. Body encoding — windows-1252, not UTF-8
+
+**Every `Portal001` page declares `charset=ISO-8859-1`**, and the HTML spec requires a browser to
+treat a document so labelled as **windows-1252**. Form bodies must therefore be percent-encoded
+in that charset, not UTF-8.
+
+Getting this wrong is silent and destructive: `URLSearchParams` encodes UTF-8, so `Diseño` goes
+out as `Dise%C3%B1o`, SII stores the mojibake, and it is then **printed on the document** as
+`DiseÃ±o` (observed 2026-09-08 — both in the saved borrador and in the preview PDF).
+
+Two details the Latin-1 range alone does not cover:
+
+- SII's own `<select>` option text contains characters from the **0x80–0x9F block** (e.g. U+2018
+  inside `ENSEÃ‘ANZA`). Encoding those as strict ISO-8859-1 turns them into `&#8216;` in the
+  rendered document; windows-1252 maps them back to single bytes, round-tripping SII's value
+  byte-faithfully.
+- Anything outside windows-1252 entirely is sent as an HTML numeric reference (`&#<n>;`), which
+  is what a browser does for an unrepresentable character.
+
+Some values SII serves are **already mojibaked in its own database** (a giro stored as
+`ENSEÃ‘ANZA`). Those are round-tripped unchanged — repairing them would alter data sent to SII.
+The listing endpoint is a separate case: see § 4's note on double-encoding.
+
+## 5c. The preview PDF is posted by the iframe's OWN form
+
+`mipeDisplayPreView.cgi` returns the review page, whose `PreViewDTE` form holds ~245 hidden
+inputs. **That is not the body the PDF CGI receives.** `PreViewFrame.html` owns a form of its
+own — `name="VIEW"`, **239 inputs** — and its `Enviar()` copies **238** values across from
+`PreViewDTE` before submitting (observed 2026-09-08):
+
+```js
+function Enviar() {
+   var f_frame  = document.forms["VIEW"];
+   var f_pagina = window.top.document.forms["PreViewDTE"];
+   f_frame.elements["INDICA_PRIMERA_EJECUCION"].value = f_pagina.elements["INDICA_PRIMERA_EJECUCION"].value;
+   … 237 more assignments …
+   f_frame.submit();
+}
+```
+
+The odd one out is **`EFXP_FOLIO`**, which is *not* copied and keeps the frame's own declared
+default — an unsigned preview has no folio:
+
+```html
+<input type="hidden" name="EFXP_FOLIO"  value="0">
+```
+
+Posting all 243 review-page hidden inputs, with `EFXP_FOLIO` empty, makes SII answer **200** with
+its generic `Error al contribuyente` page (an `alert(...)` carrying a support code) instead of the
+PDF. So the field list **and its defaults** must be read from `PreViewFrame.html` at runtime — a
+field absent from the review page falls back to the frame's declared `value`, never to `''`.
 
 ## 6. Emission — OUT OF SCOPE (documented for the boundary only)
 
