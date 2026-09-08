@@ -21,6 +21,8 @@ import {
   MAX_ITEMS,
   TIPOS_DTE,
   fetchBorradores,
+  fetchEmitidaPdf,
+  fetchEmitidas,
   fetchEmpresas,
   fetchPreviewPdf,
   fillFactura,
@@ -31,6 +33,8 @@ import {
   resolveAndSelectEmpresa,
 } from '../portal/factura.js';
 import type {
+  FacturaEmitida,
+  FacturaEmitidasFiltro,
   FacturaSelectAviso,
   FacturaBorradorInput,
   FacturaBorradorRow,
@@ -43,6 +47,9 @@ import type {
 import type { AuditEntry, Runtime } from '../seams/index.js';
 
 export type {
+  FacturaEmitida,
+  FacturaEmitidasFiltro,
+  EstadoEmitido,
   FacturaSelectAviso,
   FacturaBorradorRow,
   FacturaEmpresa,
@@ -422,6 +429,139 @@ export async function facturaPreviewPdf(
     return res;
   } catch (e) {
     audit(runtime, 'factura_preview_pdf', 'failed', { rut: empresa.canonical, tipoDte });
+    throw e;
+  }
+}
+
+// --- Documentos emitidos (read-only; ADR-023's boundary is untouched) ----------------
+
+/** The DTEs already EMITTED by `empresa`. Read-only — nothing here issues or signs. */
+export async function facturaEmitidas(
+  runtime: Runtime,
+  args: { empresa: string; tipoDte?: number } & FacturaEmitidasFiltro,
+): Promise<{ empresa: FacturaEmpresa; documentos: FacturaEmitida[] }> {
+  const empresa = Rut.parse(args.empresa);
+  const tipoDte = assertTipo(args.tipoDte);
+  if (args.receptor !== undefined) Rut.parse(args.receptor); // Mod-11 before any session
+  for (const [k, v] of [
+    ['desde', args.desde],
+    ['hasta', args.hasta],
+  ] as const) {
+    if (v !== undefined && !ISO_DATE.test(v)) {
+      throw new ValidationError(`--${k} inválida: "${v}" (formato YYYY-MM-DD).`);
+    }
+  }
+  const start = runtime.clock.now().getTime();
+  try {
+    const res = await readOnlyRetry(runtime, () =>
+      withSession(runtime, async (session) => {
+        const emp = await resolveAndSelectEmpresa(session, empresa, tipoDte, () =>
+          runtime.clock.sleep(pacingMs()),
+        );
+        await runtime.clock.sleep(pacingMs());
+        const { empresa: _drop, tipoDte: _t, ...filtro } = args;
+        return { empresa: emp, documentos: await fetchEmitidas(session, filtro) };
+      }),
+    );
+    audit(runtime, 'factura_emitidas', 'ok', {
+      rut: empresa.canonical,
+      count: res.documentos.length,
+      durationMs: runtime.clock.now().getTime() - start,
+    });
+    return res;
+  } catch (e) {
+    audit(runtime, 'factura_emitidas', 'failed', { rut: empresa.canonical });
+    throw e;
+  }
+}
+
+/** A downloaded emitted document — a DESCRIPTOR, never the bytes (ADR-022 / ADR-006). */
+export interface FacturaEmitidaDoc {
+  readonly path: string;
+  readonly archivo: string;
+  readonly bytes: number;
+  readonly contentType: 'application/pdf';
+  readonly empresa: FacturaEmpresa;
+  readonly documento: FacturaEmitida;
+}
+
+/** Download an ALREADY EMITTED document as a PDF, addressed by its `folio` (what a human has)
+ *  or by SII's internal `codigo`. The folio is resolved through the listing, so a wrong folio
+ *  fails with a clear message instead of an opaque SII page. `directorio` is REQUIRED — the
+ *  pure core cannot know `$HOME`; each surface applies its own default (ADR-022). */
+export async function facturaPdf(
+  runtime: Runtime,
+  args: {
+    empresa: string;
+    folio?: number;
+    codigo?: string;
+    tipoDte?: number;
+    directorio: string;
+  },
+): Promise<FacturaEmitidaDoc> {
+  const empresa = Rut.parse(args.empresa);
+  const tipoDte = assertTipo(args.tipoDte);
+  if (args.folio === undefined && args.codigo === undefined) {
+    throw new ValidationError('Indica el folio del documento (o su código interno).');
+  }
+  if (args.folio !== undefined && (!Number.isInteger(args.folio) || args.folio <= 0)) {
+    throw new ValidationError(`Folio inválido: "${args.folio}" (entero positivo).`);
+  }
+  const files = runtime.files;
+  if (!files) {
+    throw new FacturaError(
+      'Este runtime no tiene un FileSink configurado, así que no puede escribir el PDF. ' +
+        'Usa `createNodeRuntime()` o inyecta `files`.',
+    );
+  }
+  const start = runtime.clock.now().getTime();
+  try {
+    const res = await withSession(runtime, async (session) => {
+      const emp = await resolveAndSelectEmpresa(session, empresa, tipoDte, () =>
+        runtime.clock.sleep(pacingMs()),
+      );
+      await runtime.clock.sleep(pacingMs());
+      const found = await fetchEmitidas(
+        session,
+        args.folio === undefined ? {} : { folio: args.folio },
+      );
+      const doc =
+        args.codigo !== undefined
+          ? found.find((d) => d.codigo === args.codigo)
+          : found.find((d) => d.folio === args.folio);
+      if (!doc) {
+        throw new FacturaError(
+          `No se encontró un documento emitido ${
+            args.folio !== undefined ? `con folio ${args.folio}` : `con código ${args.codigo}`
+          } en ${emp.rut}. Revisa \`factura emitidas\`.`,
+        );
+      }
+      await runtime.clock.sleep(pacingMs());
+      const bytes = await fetchEmitidaPdf(session, doc.codigo);
+      // SII's Content-Disposition is just `<rut>.pdf` — carries no folio, so compose the name
+      // here (ADR-022): deterministic, so re-downloading refreshes in place.
+      const archivo = `factura-${doc.folio ?? doc.codigo}-${empresa.canonical}-${
+        doc.fecha ?? 'sin-fecha'
+      }.pdf`;
+      const path = await files.write(args.directorio, archivo, bytes);
+      return {
+        path,
+        archivo,
+        bytes: bytes.length,
+        contentType: 'application/pdf' as const,
+        empresa: emp,
+        documento: doc,
+      };
+    });
+    audit(runtime, 'factura_pdf', 'ok', {
+      rut: empresa.canonical,
+      folio: res.documento.folio,
+      bytes: res.bytes,
+      durationMs: runtime.clock.now().getTime() - start,
+    });
+    return res;
+  } catch (e) {
+    audit(runtime, 'factura_pdf', 'failed', { rut: empresa.canonical, folio: args.folio ?? null });
     throw e;
   }
 }

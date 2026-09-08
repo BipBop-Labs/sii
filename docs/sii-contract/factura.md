@@ -161,7 +161,51 @@ The hidden inputs are uniform and double-quoted:
 
 Success is decided by `content-type` + the `%PDF` magic, never by HTTP status (ADR-022).
 
-## 6. Emission — OUT OF SCOPE (documented for the boundary only)
+## 6. Documentos emitidos (read-only)
+
+Reached from *Ver documentos emitidos* — `mipeLaunchPage.cgi?OPCION=2&TIPO=4`, so the empresa
+chooser runs with `DESDE_DONDE_URL=OPCION=2&TIPO=4`.
+
+### Listing
+
+```
+GET /cgi-bin/Portal001/mipeAdminDocsEmi.cgi
+      ?RUT_RECP=&FOLIO=&RZN_SOC=&FEC_DESDE=&FEC_HASTA=&TPO_DOC=&ESTADO=&ORDEN=&NUM_PAG=1
+```
+
+`text/html; charset=ISO-8859-1`. All filters optional. `TPO_DOC` ∈ 33, 34, 43, 46, 52, 56, 61,
+110, 111, 112; `ESTADO` ∈ `EMI` (Documento Emitido) / `PRV` (Pre-View). Paged by `NUM_PAG`.
+
+**The row markup is MALFORMED** — the receptor cell is never closed (observed 2026-09-08):
+
+```html
+<tr> <td> <a href="/cgi-bin/Portal001/mipeGesDocEmi.cgi?ALL_PAGE_ANT=2&CODIGO=99000001">
+  <img src="/Portal001/button_edit.gif"></a></td>
+  <td>64000001-5 <td>RAZON SOCIAL</td> <td>Factura Electronica</td> <td>5</td>
+  <td>2026-09-08</td> <td>990000</td> <td>Documento Emitido</td> </tr>
+```
+
+So rows are split on the `mipeGesDocEmi.cgi?…CODIGO=` anchor and cells on `<td`, never with a
+strict HTML parser. Columns: receptor RUT · razón social · tipo · folio · fecha · monto · estado.
+`CODIGO` is `DHDR_CODIGO`, SII's internal id and the key the PDF is fetched by.
+
+### The emitted document's PDF
+
+```
+GET /cgi-bin/Portal001/mipeDisplayPDF.cgi?DHDR_CODIGO=<codigo>
+      → application/pdf
+        content-disposition: inline; filename=<rut>.pdf
+```
+
+A plain authenticated GET — no review page, no iframe form, unlike the borrador preview. The
+detail page (`mipeGesDocEmi.cgi?ALL_PAGE_ANT=2&CODIGO=<codigo>`) embeds it in an iframe and is
+sent as the `Referer`. The result is the REAL document: folio assigned, timbre electrónico, and
+none of the "VISTA PREVIA / DOCUMENTO NO VALIDO" watermark. `Content-Disposition` carries only
+the RUT — no folio — so the local filename is composed by the caller (ADR-022).
+
+Success is decided by `content-type` + `%PDF` magic, never by HTTP status.
+
+## 7. Emission — OUT OF SCOPE (documented for the boundary only)
 
 The review page's `Firmar` button:
 
