@@ -31,3 +31,6 @@ coverage/
 
 # local working doc — status is managed locally, not versioned
 docs/CURRENT_STATUS.md
+
+# per-developer local tool settings — machine-specific, not versioned
+.claude/settings.local.json
