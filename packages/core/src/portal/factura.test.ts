@@ -4,6 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import { FakePortalSession } from '../adapters/fake/index.js';
 import { FacturaError } from '../errors/index.js';
+import { LOGIN_HOST } from '../config/index.js';
 import { Rut } from '../rut/index.js';
 import {
   eliminaBorrador,
@@ -137,7 +138,8 @@ describe('fillFactura', () => {
   });
 
   it('rejects a login-wall / wrong landing', async () => {
-    const s = new FakePortalSession({ landingUrl: 'https://zeusr.sii.cl/AUT2000/' });
+    // the login host is config's to own, never a literal (ADR-004)
+    const s = new FakePortalSession({ landingUrl: `https://${LOGIN_HOST}/AUT2000/` });
     await expect(fillFactura(s, EMPRESA, INPUT)).rejects.toThrow(/no entregó el formulario/);
   });
 });
