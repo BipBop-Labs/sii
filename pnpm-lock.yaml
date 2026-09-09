@@ -33,7 +33,7 @@ importers:
         specifier: workspace:^
         version: link:../core
       '@napi-rs/keyring':
-        specifier: ^2.0.0
+        specifier: 2.0.0
         version: 2.0.0
       commander:
         specifier: ^12.1.0
@@ -49,7 +49,7 @@ importers:
         version: 4.4.3
     devDependencies:
       '@napi-rs/keyring':
-        specifier: ^2.0.0
+        specifier: 2.0.0
         version: 2.0.0
       playwright:
         specifier: ^1.49.0

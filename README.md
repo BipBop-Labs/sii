@@ -80,7 +80,8 @@ npx playwright install chromium
 sii auth login
 
 #    Alternativa sin tipear: guarda la Clave en el llavero del sistema y usa --keyring
-#    secret-tool store --label='SII' service sii username <tu-rut>   # Linux (Secret Service)
+#    secret-tool store --label='SII' service sii username <tu-rut>       # Linux
+#    security add-generic-password -s sii -a <tu-rut> -w                  # macOS
 #    sii auth login --keyring --rut <tu-rut>                         # un intento, sin re-login automático
 
 # 4) Úsalo desde la terminal
