@@ -13,13 +13,21 @@ import {
 import { FixedClock, InMemoryKeyValueStore, RecordingAuditSink } from './adapters/fake/index.js';
 
 describe('createNodeRuntime', () => {
-  it('wires the Node default adapters, keyring included', () => {
+  it('wires the Node default adapters', () => {
     const runtime = createNodeRuntime();
     expect(runtime.clock).toBeInstanceOf(SystemClock);
     expect(runtime.audit).toBeInstanceOf(FileAuditSink);
     expect(runtime.store).toBeInstanceOf(FileKeyValueStore);
     expect(runtime.portal).toBeInstanceOf(PlaywrightPortalDriver);
-    expect(runtime.secrets).toBeInstanceOf(KeyringSecretStore);
+  });
+
+  it('does NOT default a keyring: only the CLI wires one (ADR-006 / ADR-025)', () => {
+    // The MCP server builds from this same function, so a `secrets` default would hand
+    // it a live OS-keyring reader. The CLI passes one explicitly instead.
+    expect(createNodeRuntime().secrets).toBeUndefined();
+    expect(createNodeRuntime({ secrets: new KeyringSecretStore() }).secrets).toBeInstanceOf(
+      KeyringSecretStore,
+    );
   });
 
   it('replaces ONLY the overridden seams, keeping the other defaults', () => {

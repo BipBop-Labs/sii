@@ -18,20 +18,29 @@ Clave, and asked the CLI to read from it.
 
 ## Decision
 
-- **Add `KeyringSecretStore`, the default `SecretStore` adapter** under
-  `adapters/node/` (the `./node` composition subpath — the pure barrel stays Node-free,
-  ADR-016). `Runtime.secrets` stays OPTIONAL: an embedded consumer that injects nothing
-  gets no keyring, and a task that needs one raises an actionable error.
-- **Library: `@napi-rs/keyring`** — a prebuilt N-API binding over the platform store
-  (Secret Service on Linux, Keychain on macOS), no Python/node-gyp build step. It is
-  general-purpose infrastructure, not SII code (ADR-004 untouched).
+- **Add `KeyringSecretStore`, the CLI's `SecretStore` adapter** under `adapters/node/`
+  (the `./node` composition subpath — the pure barrel stays Node-free, ADR-016). It is
+  NOT a `createNodeRuntime` default: the MCP server builds from that same function, so a
+  default would hand it a live keyring reader. **The CLI's composition root wires it
+  explicitly** (`createNodeRuntime({ secrets: new KeyringSecretStore() })`); the MCP
+  process therefore has no keyring BY CONSTRUCTION, not because no code happens to call
+  one. `Runtime.secrets` stays OPTIONAL and is typed as a **`SecretReader`** (`get`
+  only), so no task can write to the keyring even by mistake.
+- **Library: `@napi-rs/keyring`, pinned EXACTLY (`2.0.0`, not `^2.0.0`)** — a prebuilt
+  N-API binding over the platform store (Secret Service on Linux, Keychain on macOS), no
+  Python/node-gyp build step. It is general-purpose infrastructure, not SII code (ADR-004
+  untouched). The exact pin is deliberate: a native module that reads the OS credential
+  store, at a major published days before adoption, must not roll forward on a plain
+  `pnpm install` without a human looking.
 - **Lookup key: service `sii`, username = the RUT.** The RUT is normalized before the
   lookup and tried in the renderings a human plausibly stored (canonical `12345678-9`,
   dotted `12.345.678-9`, body-only, upper-case `K`); the FIRST hit wins. Rationale: the
   keyring is populated by hand (`secret-tool`, Seahorse), so the code adapts to the
   human, not the reverse.
-- **Explicit login only.** The keyring is read by ONE verb — `sii auth login --keyring`
-  — which makes exactly ONE attempt and then behaves like ADR-010's console login
+- **Explicit login only, and read LAST.** The keyring is read by ONE verb — `sii auth
+  login --keyring` — and only AFTER the live-session probe misses, so an
+  already-authenticated user never triggers a keyring-unlock prompt for a value nobody
+  will use. It makes exactly ONE attempt and then behaves like ADR-010's console login
   (headless `credentialLogin`, Clave discarded from memory, cookies-only persisted).
   **No automatic re-login**: a task that meets `SessionExpiredError` still fails with
   "ejecuta `sii auth login`" and NEVER re-mints (ADR-019 lineage — authentication is an
@@ -39,6 +48,12 @@ Clave, and asked the CLI to read from it.
 - **CLI-only, like `consoleLogin`.** The task is exported from the `@albertomarturelo/sii-core/cli`
   subpath, never the main barrel, so the MCP server cannot wire it (ADR-006). The MCP
   surface gains nothing: no tool, no argument, no keyring read.
+- **A missing BINDING is not an empty keyring.** `get` collapses "no entry", "locked"
+  and "no Secret Service" to `null` (so the store never leaks wording about an entry),
+  but a failed native import raises its own actionable error — otherwise a broken
+  platform install would tell the user to re-store a Clave they already stored.
+- **Unattended by default.** `--keyring` never blocks on a prompt: without `--rut` it
+  takes the last local session's RUT, and with neither it fails naming the flag.
 - **The Clave never lands anywhere else**: not in the audit log (the receipt records
   `reason: 'keyring_login'` and the RUT only), not in an error message, not on disk.
   The CLI never WRITES to the keyring — storing the Clave is the user's own act with

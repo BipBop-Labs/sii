@@ -69,6 +69,12 @@ describe('sii auth commands (fake runtime, no SII)', () => {
     );
   });
 
+  it('auth login --keyring without --rut and without a session says which flag to pass', async () => {
+    // --keyring is for unattended use: it must fail fast, never block on a prompt.
+    const rt = { ...makeRuntime(), secrets: new testing.InMemorySecretStore() };
+    await expect(run(rt, 'auth', 'login', '--keyring')).rejects.toThrow(/--rut <rut>/);
+  });
+
   it('auth status reports the local session after login', async () => {
     const rt = makeRuntime();
     await run(rt, 'auth', 'login');
