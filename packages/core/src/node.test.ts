@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   FileAuditSink,
   FileKeyValueStore,
+  KeyringSecretStore,
   PlaywrightPortalDriver,
   SystemClock,
   createNodeRuntime,
@@ -12,12 +13,13 @@ import {
 import { FixedClock, InMemoryKeyValueStore, RecordingAuditSink } from './adapters/fake/index.js';
 
 describe('createNodeRuntime', () => {
-  it('wires the four Node default adapters', () => {
+  it('wires the Node default adapters, keyring included', () => {
     const runtime = createNodeRuntime();
     expect(runtime.clock).toBeInstanceOf(SystemClock);
     expect(runtime.audit).toBeInstanceOf(FileAuditSink);
     expect(runtime.store).toBeInstanceOf(FileKeyValueStore);
     expect(runtime.portal).toBeInstanceOf(PlaywrightPortalDriver);
+    expect(runtime.secrets).toBeInstanceOf(KeyringSecretStore);
   });
 
   it('replaces ONLY the overridden seams, keeping the other defaults', () => {
@@ -34,6 +36,14 @@ describe('createNodeRuntime', () => {
     const audit = new RecordingAuditSink();
     const runtime = createNodeRuntime({ audit });
     expect(runtime.audit).toBe(audit);
+  });
+});
+
+describe('KeyringSecretStore', () => {
+  it('constructs without importing the native keyring binding (lazy, ADR-025)', () => {
+    // Same rule as the portal driver: composing a runtime must not load a native
+    // module. Only an actual get/set/delete reaches @napi-rs/keyring.
+    expect(() => new KeyringSecretStore()).not.toThrow();
   });
 });
 

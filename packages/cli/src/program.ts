@@ -21,7 +21,7 @@ import {
 } from '@albertomarturelo/sii-core';
 // CLI-only credential login (takes a Clave) — kept off the main barrel so MCP
 // can't wire it (ADR-006 / ADR-010).
-import { consoleLogin } from '@albertomarturelo/sii-core/cli';
+import { consoleLogin, keyringLogin } from '@albertomarturelo/sii-core/cli';
 import { emit, out, setOutputMode, withOutputFlags } from './io.js';
 import { printOperatingHeader } from './operating-header.js';
 import { nodePrompters, type Prompters } from './prompt.js';
@@ -63,14 +63,34 @@ export function buildProgram(runtime: Runtime, prompters: Prompters = nodePrompt
   auth
     .command('login')
     .description(
-      'Inicia sesión con Clave Tributaria (navegador por defecto; --console por terminal).',
+      'Inicia sesión con Clave Tributaria (navegador por defecto; --console por terminal, ' +
+        '--keyring desde el llavero del sistema).',
     )
     .option(
       '--console',
       'Introduce RUT y Clave por la terminal (sin navegador); guarda solo cookies.',
     )
-    .option('--rut <rut>', 'RUT para el login por consola (si se omite, se pregunta).')
-    .action(async (opts: { console?: boolean; rut?: string }) => {
+    .option(
+      '--keyring',
+      'Lee la Clave del llavero del sistema: servicio "sii", username = tu RUT. ' +
+        "Guárdala con: secret-tool store --label='SII' service sii username <rut>",
+    )
+    .option('--rut <rut>', 'RUT para el login por consola o llavero (si se omite, se pregunta).')
+    .action(async (opts: { console?: boolean; keyring?: boolean; rut?: string }) => {
+      if (opts.keyring) {
+        // Same lockout rule as --console: the RUT is Mod-11-checked locally so a typo
+        // never becomes a failed SII attempt (ADR-004). ONE attempt, no retry (ADR-025).
+        const rutInput = opts.rut ?? (await prompters.line('RUT: '));
+        const result = await keyringLogin(runtime, { rut: rutInput });
+        emit(result, () =>
+          out(
+            result.reason === 'already_authenticated'
+              ? `Ya tienes una sesión activa como ${fmt(result.rut)}.`
+              : `Sesión iniciada como ${fmt(result.rut)} (Clave leída del llavero).`,
+          ),
+        );
+        return;
+      }
       if (opts.console) {
         // Validate the RUT (Mod-11) LOCALLY before any attempt — a malformed RUT must
         // never become a wasted login that counts toward account lockout (ADR-004).
