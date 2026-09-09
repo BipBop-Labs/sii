@@ -6,6 +6,7 @@ import { Command } from 'commander';
 import {
   LoginFailedError,
   Rut,
+  ValidationError,
   authStatus,
   describeOperating,
   formatOperableEntry,
@@ -73,14 +74,23 @@ export function buildProgram(runtime: Runtime, prompters: Prompters = nodePrompt
     .option(
       '--keyring',
       'Lee la Clave del llavero del sistema: servicio "sii", username = tu RUT. ' +
-        "Guárdala con: secret-tool store --label='SII' service sii username <rut>",
+        "Guárdala con: secret-tool store --label='SII' service sii username <rut> (Linux) " +
+        'o security add-generic-password -s sii -a <rut> -w (macOS). Con --keyring, si ' +
+        'omites --rut se usa el RUT de la última sesión local; nunca pregunta (uso desatendido).',
     )
     .option('--rut <rut>', 'RUT para el login por consola o llavero (si se omite, se pregunta).')
     .action(async (opts: { console?: boolean; keyring?: boolean; rut?: string }) => {
       if (opts.keyring) {
-        // Same lockout rule as --console: the RUT is Mod-11-checked locally so a typo
-        // never becomes a failed SII attempt (ADR-004). ONE attempt, no retry (ADR-025).
-        const rutInput = opts.rut ?? (await prompters.line('RUT: '));
+        // --keyring exists for SCRIPTED, unattended use (ADR-025), so it must never block
+        // on a prompt: without --rut it falls back to the last local session's RUT, and
+        // failing that it says which flag to pass. The RUT is Mod-11-checked in the task,
+        // so a typo never becomes a failed SII attempt (ADR-004). ONE attempt, no retry.
+        const rutInput = opts.rut ?? (await authStatus(runtime)).rut;
+        if (!rutInput) {
+          throw new ValidationError(
+            'No hay sesión local previa de la que tomar el RUT. Indica `--rut <rut>`.',
+          );
+        }
         const result = await keyringLogin(runtime, { rut: rutInput });
         emit(result, () =>
           out(

@@ -546,11 +546,22 @@ describe('auth — keyring login (ADR-025, synthetic data)', () => {
     expect(JSON.stringify(audit.entries)).not.toContain(CRED.clave);
   });
 
+  it('a live session short-circuits BEFORE the keyring is read (no unlock prompt)', async () => {
+    const driver = credDriver(realPersonaDatos);
+    const secrets = new InMemorySecretStore(new Map([['20000042-0', CRED.clave]]));
+    const rt = keyringRuntime(driver, secrets);
+    await keyringLogin(rt, { rut: '20000042-0' }); // mint
+    secrets.reads.length = 0;
+    const again = await keyringLogin(rt, { rut: '20000042-0' });
+    expect(again).toMatchObject({ reason: 'already_authenticated' });
+    expect(secrets.reads).toEqual([]); // the Clave was never pulled into memory
+  });
+
   it('no entry in the keyring → CredentialNotFoundError, and SII is never contacted', async () => {
     const driver = credDriver(realPersonaDatos);
     const rt = keyringRuntime(driver, new InMemorySecretStore());
-    await expect(keyringLogin(rt, { rut: '20000042-0' })).rejects.toBeInstanceOf(
-      CredentialNotFoundError,
+    await expect(keyringLogin(rt, { rut: '20000042-0' })).rejects.toThrow(
+      /secret-tool store[\s\S]*security add-generic-password/,
     );
     expect(driver.credentialLoginCalls).toBe(0);
   });

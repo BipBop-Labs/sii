@@ -5,11 +5,9 @@
 //
 // The binding is a native module, so it is imported LAZILY: composing a runtime — or
 // running the MCP server, which never reads a secret — must not load it (ADR-016).
+import { KEYRING_SERVICE } from '../../config/index.js';
+import { SiiError } from '../../errors/index.js';
 import type { SecretStore } from '../../seams/index.js';
-
-/** The keyring "service" every entry of this tool lives under. The account (`username`
- *  in keyring terms) is the RUT — see `keyringLogin` for the renderings it tries. */
-export const KEYRING_SERVICE = 'sii';
 
 interface KeyringEntry {
   getPassword(): string | null;
@@ -24,9 +22,19 @@ export class KeyringSecretStore implements SecretStore {
   constructor(private readonly service: string = KEYRING_SERVICE) {}
 
   private async entry(account: string): Promise<KeyringEntry> {
-    // ponytail: a plain dynamic import is the whole lazy-load — no cache, the module
-    // registry already is one.
-    const mod = (await import('@napi-rs/keyring')) as unknown as KeyringModule;
+    // A plain dynamic import is the whole lazy-load — the module registry is the cache.
+    // A FAILURE HERE IS NOT "no entry": the native binding is missing or unsupported on
+    // this platform, and reporting that as an empty keyring would send the user off to
+    // re-store a Clave they already stored (review of #101).
+    let mod: KeyringModule;
+    try {
+      mod = (await import('@napi-rs/keyring')) as unknown as KeyringModule;
+    } catch (err) {
+      throw new SiiError(
+        'El binding del llavero (@napi-rs/keyring) no está disponible en esta plataforma. ' +
+          `Usa \`sii auth login --console\`. Detalle: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     return new mod.Entry(this.service, account);
   }
 
@@ -34,9 +42,11 @@ export class KeyringSecretStore implements SecretStore {
     // A missing entry, a locked keyring and an absent Secret Service all mean the same
     // to the caller: no credential here. The caller turns that into its own actionable
     // message (which service/username it looked for) — swallowing the platform's own
-    // wording keeps a secret-store error from leaking anything about the entry.
+    // wording keeps a secret-store error from leaking anything about the entry. A
+    // missing BINDING is different and propagates (see `entry`).
+    const entry = await this.entry(account);
     try {
-      return (await this.entry(account)).getPassword();
+      return entry.getPassword();
     } catch {
       return null;
     }
