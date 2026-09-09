@@ -8,6 +8,7 @@ import {
   NodeFileSink,
   SystemClock,
 } from './adapters/node/index.js';
+import { KeyringSecretStore } from './adapters/node/keyring.js';
 import { PlaywrightPortalDriver } from './adapters/node/portal.js';
 import type { Runtime } from './seams/index.js';
 
@@ -19,12 +20,15 @@ export {
   SII_DIR,
   SystemClock,
 } from './adapters/node/index.js';
+export { KEYRING_SERVICE, KeyringSecretStore } from './adapters/node/keyring.js';
 export { PlaywrightPortalDriver } from './adapters/node/portal.js';
 
 /** Composition root: the Node default adapters, any seam replaceable (ADR-016).
  *  e.g. `createNodeRuntime({ audit: myAuditSink })` keeps the other three defaults.
  *  The default portal is the Playwright driver — its `playwright` OPTIONAL peer is
- *  loaded lazily on first use, so composing (or overriding `portal`) never needs it. */
+ *  loaded lazily on first use, so composing (or overriding `portal`) never needs it.
+ *  `secrets` is the OS keyring (ADR-025), lazy in the same way and read by exactly one
+ *  CLI-only task (`keyringLogin`) — nothing else ever touches it. */
 export function createNodeRuntime(overrides: Partial<Runtime> = {}): Runtime {
   return {
     clock: new SystemClock(),
@@ -32,6 +36,7 @@ export function createNodeRuntime(overrides: Partial<Runtime> = {}): Runtime {
     store: new FileKeyValueStore(),
     portal: new PlaywrightPortalDriver(),
     files: new NodeFileSink(),
+    secrets: new KeyringSecretStore(),
     ...overrides,
   };
 }
