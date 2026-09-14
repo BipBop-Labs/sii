@@ -25,12 +25,35 @@ Superficies de **lectura** operativas y validadas en vivo: autenticación
 observaciones / historial), **F29** (Fase 1), **BTE/BHE**, **DTE autorizados**
 (consulta pública), **whoami** y **peticiones administrativas** (SISPAD).
 
+Tres formas de iniciar sesión, todas cookies-only: **navegador** (tecleas la Clave en
+la página real del SII), **consola** (`--console`, Clave oculta por terminal) y
+**llavero del sistema** (`--keyring`: la Clave que tú guardaste en Keychain / Secret
+Service, un intento, sin re-login automático —
+[ADR-025](docs/decisions/025-keyring-secret-store.md)). La CLI nunca escribe la Clave
+en ningún lado, y el servidor MCP no tiene acceso al llavero en absoluto.
+
+**Carpeta Tributaria**: `carpeta instituciones` lee la lista vigente de instituciones
+destinatarias directamente del SII (los códigos cambian, así que no se empaqueta ninguno).
+Vive en la plataforma **www2** del SII, que autoriza con una **sesión propia**: por eso
+existe `sii auth login --www2`, un segundo login cookies-only en el que tecleas la Clave en
+la página OAuth real del SII —nunca headless, porque ahí corre reCAPTCHA
+([ADR-026](docs/decisions/026-www2-app-session-login.md))—. Ambas sesiones conviven en el
+mismo archivo; `auth status` las muestra y `auth logout` cierra las dos.
+
 Primera superficie de **descarga de documentos**: `f29 pdf`, que guarda en disco
 el F29 presentado de un mes —el formulario tal como lo imprime el SII y, cuando el
 período fue pagado, **su comprobante de pago**— y el Certificado de Declaración.
 
 Primera superficie de **escritura**: `bte emit` (emisión de Boletas de Honorarios
 Electrónicas).
+
+**Facturación por el Portal MIPYME** (`sii dte`): prepara una factura (DTE 33/34) con
+la Clave —sin certificado digital—, la guarda como **borrador**, te da el PDF de vista
+previa, y lee los documentos que una empresa ya emitió por el portal, con sus PDF.
+**Solo borradores: la emisión no está implementada a propósito** — la firma ahí es del
+lado del servidor, así que la Clave sola bastaría para emitir un documento con validez
+legal, y ese paso irreversible queda contigo en la UI del SII
+([ADR-023](docs/decisions/023-factura-borradores-only.md)).
 
 Checklist completo en [`docs/ROADMAP.md`](docs/ROADMAP.md); el historial de
 versiones, en [`CHANGELOG.md`](CHANGELOG.md).
@@ -89,6 +112,7 @@ sii peticiones list            # ¿tengo trámites detenidos ("en espera de Ante
 sii rcv summary 2026-05        # resumen del RCV de compras
 sii f29 overview 2026          # posición de IVA mes a mes
 sii f29 pdf 2026-05            # descarga el PDF del F29 de mayo
+sii dte emitidos --empresa <rut>   # documentos emitidos por el Portal MIPYME
 ```
 
 ### Conectar el MCP a Claude
@@ -132,8 +156,13 @@ el **MCP** las ofrece como *tools* a Claude; la **CLI**, como comandos `sii …`
 
 Claude ve las operaciones como herramientas con permiso configurable por
 herramienta (lectura vs escritura). Las de **escritura** —iniciar/cerrar sesión,
-operar como, y **emitir** una BHE— quedan controladas: `bte_emit` es la única
-`destructive` y exige confirmación explícita.
+operar como, guardar un borrador de factura, y **emitir** una BHE— quedan
+controladas. Dos son `destructive` y exigen confirmación explícita: `bte_emit`
+(irreversible y con validez legal, más el monto en eco) y `dte_borrador_delete`
+(borrar un borrador no se deshace). Guardar un borrador **no** lo es: es
+reversible y sin efecto legal, así que no pide ceremonia
+([ADR-023](docs/decisions/023-factura-borradores-only.md)). **Emitir** una factura
+no está expuesto en ninguna herramienta.
 
 Las herramientas que **descargan documentos** (`f29_pdf`, `dte_pdf`, `dte_preview_pdf`) escriben el archivo en tu
 disco y devuelven **solo su ruta y tamaño, nunca el contenido**: un F29 lleva razón

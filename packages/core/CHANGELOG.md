@@ -4,6 +4,194 @@ All notable changes to `@albertomarturelo/sii-core` are documented here. The for
 loosely based on [Keep a Changelog](https://keepachangelog.com/); the package is
 pre-1.0, so MINOR bumps may carry breaking changes (pin or use `~` downstream).
 
+## 0.10.0 — 2026-09-12
+
+### Added
+
+- **The www2 APP SESSION — a second cookies-only layer (#116, ADR-026).** SII's newer apps
+  on `www2.sii.cl/app/*` (and their `/app/<name>-api/*` JSON facades) are **not** authorized
+  by the classic `.sii.cl` cookies this library has always captured — those reach www1, www3,
+  www4 and loa, but every `cte-api` call answers a bare `401`. The layer is minted by an
+  OAuth2 code flow at SII's own `oauthsii-v1` page, so `login(runtime, { www2: true })` runs
+  it as a second **headed** login: the user types the Clave into SII's page (reCAPTCHA
+  Enterprise gates it — there is no headless variant, by decision), and only cookies are kept.
+  The classic jar is snapshotted **before** that step, because the OAuth page deletes the
+  classic cookies from the browser context on mount, and merged with the www2 cookies
+  (`name+domain+path`) into the same session file. Verified live 2026-09-12.
+- **`portal/www2-session.ts` — the shared app-session read.** `readWww2Session(session, url)`
+  replays the SPA's own liveness call (`GET /app/session/status`) and returns its `userId`,
+  which keys every `/app/<name>-api/*` path **verbatim** (the canonical RUT, observed). Every
+  www2 facade reads it first; a new www2 app reuses it instead of inventing a warm-up.
+- **`Www2SessionError`** — a `NotAuthenticatedError` subclass, **distinct from
+  `SessionExpiredError`**: the classic Mi SII session may be perfectly alive while the www2
+  layer is missing, and the fix is a login (`sii auth login --www2`), never a retry.
+- **Carpeta Tributaria — the live `instituciones` catalog (#110).** `carpetaInstituciones`
+  returns SII's own list of destination institutions (the `enfinCodigo` the Regular carpeta's
+  `/generar` demands): a bare JSON array validated with zod at the boundary, rows projected
+  alias-tolerantly, all **8 observed keys** curated (`codigo`, `descripcion`, `abreviacion`,
+  `tipo`, the institution's canonicalised `rut`, `vigenteDesde`, `vigenteHasta`). **No catalog
+  is hardcoded** — the codes drift, and a hardcoded one had already gone stale. `codigo` stays
+  a **string compared verbatim**: live, zero-padded (`"016"`) and unpadded (`"1005"`) codes
+  coexist. `resolveInstitucion` validates a caller's choice against the live list and names the
+  valid codes on a miss, before any `/generar` round trip. Session-keyed; 67 rows live 2026-09-12.
+- **`UnexpectedResponseError` (#111/#112)** — an authenticated `requestJson` whose body is
+  neither JSON nor the login wall now raises this instead of a misleading "session expired".
+  It carries the endpoint, status, content-type and the first ~80 chars of the body verbatim,
+  so a SII quirk is distinguishable from a dead session without a second round trip. Observed
+  on the cte-api `obtenerValorParametro`, which answers `200 text/plain` to a LIVE session.
+- **`assertOperatingSelf(runtime, mkError)`** (`auth/session.ts`) — the session-keyed guard
+  that rejects a representing operate pointer before a session is opened, now shared: the
+  surface supplies its own typed error and wording. `f29` and `bte` keep their private copies
+  until their next touch.
+- **`HOSTS.portalApp`** (`www2.sii.cl`) plus the app page and session-close constants.
+
+### Changed
+
+- **Additive fields on returned objects** (no consumer break): `AuthStatusLocal` gains
+  `www2: { authenticated, expiresAt }`, decided locally from the layer's stored cookie expiry;
+  `statusRefresh` now returns `AuthIdentityRefresh` (the identity plus the layer read **live**);
+  `AuthLogoutResult` gains `www2Closed`. `login` takes an optional second argument
+  (`LoginOptions`). `logout` best-effort closes the www2 session before the classic one.
+- **The login receipt records the outcome, not the probe.** The warm-session check no longer
+  audits: with `--www2` on a warm classic session that lacks the layer, the probe hits and the
+  browser still opens, so the log used to carry a false `already_authenticated` receipt
+  alongside the real `browser_login` one (ADR-004: the log records what happened).
+
+### Fixed
+
+- **The www2 layer's expiry is read from any `X-SII-STATE-*` cookie, not a fixed name.** The
+  state cookie's suffix **varies** — a spike saw `X-SII-STATE-CT`, the first real login
+  `X-SII-STATE-CL`, alongside the literal `X-SII-STATE-TYPE`. Keying on one name returned
+  `null`, so the layer reported no expiry. The maximum expiry across them is used, so a
+  session-scoped `-TYPE` cannot mask the dated one.
+
+## 0.9.0 — 2026-09-09
+
+### Breaking (type-level only)
+
+- **`Runtime.secrets` is now a `SecretReader`** (`Pick<SecretStore, 'get'>`), no longer a
+  full `SecretStore`. A consumer that *supplies* one is unaffected — a `SecretStore` is
+  assignable to a `SecretReader`. A consumer that *called* `runtime.secrets.set(…)` or
+  `.delete(…)` from a task no longer compiles, which is the point: storing the Clave is
+  the user's own act with their own tool, so no task can write to the keyring even by
+  mistake (ADR-025). `secrets` was never wired by any default runtime before this release,
+  so no shipped code path changes.
+- **`AuthLoginResult.reason` gains `'keyring_login'`.** An exhaustive `switch` over the
+  union needs the new arm.
+
+### Added
+
+- **`keyringLogin` — the Clave from the OS keyring, for an explicit login only (#101,
+  #105, ADR-025).** Resolves the `SecretStore` backend ADR-006 left open. Exported from
+  the **CLI-only `@albertomarturelo/sii-core/cli` subpath**, never the main barrel — a test
+  pins that neither Clave-handling task (`consoleLogin`, `keyringLogin`) is reachable from
+  `@albertomarturelo/sii-core`, which is all the MCP server imports. Looks the entry up under
+  service `sii` with the RUT as username, tried canonical → dotted → body-only (the keyring
+  is populated by hand, so the code adapts to the human); SII always receives the canonical
+  RUT. Mod-11 runs **before** the keyring is touched. Then it is `consoleLogin`'s flow:
+  **ONE attempt, never retried** (a stale entry must not become a lockout, ADR-004), a
+  cookies-only session, the Clave discarded with the frame. **No automatic re-login** — a
+  task that meets `SessionExpiredError` still says "ejecuta `sii auth login`"; the
+  alternative was considered and rejected in ADR-025 as the shape that turns one stale entry
+  into a locked account.
+- **Read last.** The credentials reach the shared `credentialLoginFlow` as a thunk, so the
+  keyring is consulted only after the live-session probe misses — an already-authenticated
+  user never triggers a keyring-unlock prompt for a value nobody will use. `consoleLogin`
+  passes a resolved thunk; its behaviour is unchanged.
+- **`KeyringSecretStore`** (`./node` subpath) over **`@napi-rs/keyring` `2.0.0`, pinned
+  exactly** — Secret Service on Linux, Keychain on macOS, a prebuilt N-API binding imported
+  LAZILY so composing a runtime loads no native module. It is **not a `createNodeRuntime`
+  default**: the MCP server builds from that same function, so a default would have handed
+  it a live keyring reader. The CLI's composition root wires it explicitly; `createNodeRuntime().secrets`
+  is asserted `undefined`. A failed native import raises its own actionable error (naming
+  `--console`) instead of collapsing into "no entry", which would have sent the user off to
+  re-store a Clave they already stored; entry-level failures (missing, locked, no Secret
+  Service) still read as `null`, so no wording about an entry leaks.
+- **`testing.InMemorySecretStore`** — the keyring stand-in, so a test never reads the real
+  one. **`CredentialNotFoundError`** now carries the exact `secret-tool` (Linux) and
+  `security add-generic-password` (macOS) invocations that store the entry.
+
+### Notes
+
+- The audit receipt for a keyring login records `reason: 'keyring_login'` and the RUT —
+  never the Clave (tested against the serialised receipt). The persisted session is
+  cookies-only, exactly `{rut, cookies, savedAt}` (tested).
+- `SecretReader` is referenced by the public `Runtime` type but not yet re-exported from
+  the main barrel; a consumer typing an override by name should import `SecretStore`, which
+  is assignable. Worth exporting in a follow-up.
+
+## 0.8.0 — 2026-09-09
+
+### Added
+
+- **The Portal MIPYME DTE surface — borradores, preview and emitted documents (#90, #91,
+  ADR-023).** SII's own FREE facturación portal (`Portal001` CGIs), reached with the Clave
+  alone. New tasks: `dteEmpresas`, `dteBorradorList`, `dteBorradorSave`,
+  `dteBorradorDelete`, `dtePreviewPdf`, `dteEmitidos`, `dtePdf`, plus `TIPOS_DTE` and
+  `MAX_ITEMS`. DTE **33** and **34** wired; more types arrive as a `--tipo` parameter, not
+  as new verbs (ADR-024).
+- **BORRADORES ONLY — emission is deliberately out of scope (ADR-023).** Signing on this
+  portal is SERVER-SIDE (`mipeGenXMLFirma.cgi`, no certificado digital required), so a
+  Clave alone would be enough to issue a legally binding factura. `mipeGenXMLFirma.cgi` is
+  never called from this codebase, and a test asserts its absence from the compiled output.
+  Everything needed to *prepare* a document is automated; the one irreversible click stays
+  with a human in SII's own UI, one navigation away from any borrador this writes.
+- **A third authorization mode: EMPRESA-KEYED (ADR-023).** Besides body-RUT (RCV) and
+  session-keyed (F22/F29/BTE), the MIPYME portal keeps its OWN authorized-empresa list
+  (`mipeSelEmpresa.cgi` — the empresas that registered this user as *usuario autorizado*),
+  which is neither the operate pointer's operable set nor the session principal. `empresa`
+  is validated against that LIVE list and re-selected before every operation, since the
+  choice scopes the form, the borrador CRUD and the listing. An unknown RUT fails with the
+  available list.
+- **Single-empresa accounts resolve instead of failing (#95).** Such an account gets no
+  chooser at all — SII answers a JS launcher — so the empresa is read off the form's DTE
+  header box and nothing is POSTed. `parseChooser` returns a `launcher` / `chooser` /
+  `sinAutorizacion` shape rather than assuming a `<select>`.
+- **SII's own validator judges the document, in-page, before anything is POSTed
+  (ADR-023).** The factura form ships `validaFacEx()`; it is run via `evaluate` with
+  `window.alert` captured, and its Spanish refusals surface VERBATIM (ADR-004). It produces
+  exactly the refusals the server would bounce, so an invalid document never costs a round
+  trip — posting past it was observed to redirect back to the form with the same alert.
+- **A draft is a write, but not a destructive one (ADR-023).** `dteBorradorSave` is
+  reversible and legally inert, so it carries no double-entry confirm and no
+  `destructiveHint` — that ceremony (ADR-017) is for the irreversible step. The DELETE is
+  gated instead.
+- **The preview PDF and the emitted document follow the ADR-022 descriptor contract.**
+  `mipePreView.cgi` (stamped "VISTA PREVIA · DOCUMENTO NO VALIDO", no folio) and
+  `mipeDisplayPDF.cgi?DHDR_CODIGO=` are fetched with `requestBinary`, written through
+  `FileSink`, and the task returns `{path, archivo, bytes, …}` — never the bytes. The local
+  filename is composed here: SII's `Content-Disposition` carries only the RUT.
+- **`PortalSession.requestForm`** now backs the borrador CRUD (`mipeGrabaBorrador` /
+  `mipeEliminaBorrador`, `ES_BORR=TRUE`); the borradores listing is a bare JSON array on
+  www4 with no SDI envelope, and the emitted listing is ISO-8859-1 HTML whose rows are
+  MALFORMED — SII never closes the receptor cell — so it is parsed by anchor + `<td` split,
+  never with a strict parser.
+- **PII posture.** Curated rows, **NO `raw`** anywhere on this surface (a row is counterparty
+  identity, ADR-004). The audit records the empresa RUT, the borrador id or folio and row
+  counts — never the counterparty, the amounts or free text.
+
+### Fixed
+
+- **`parseEmitidas` no longer drops blank cells before mapping the row by index (#92).** A
+  `PRV` (vista previa) document has no folio, so its folio cell comes back blank; filtering
+  it slid every later column one place left — fecha into folio
+  (`Number('2026-09-08')` ⇒ `NaN` ⇒ `null` once serialised), monto into fecha, estado into
+  monto — producing a plausible row with the values under the wrong names and raising
+  nothing. Cells now map positionally, a blank one reads as `null`, and a row whose cell
+  count is not EXACTLY the observed seven raises "scraper roto" (exact rather than a
+  minimum: a blank cell *before* the receptor RUT shifts the row just as badly). `cellText`
+  folds `&nbsp;` into whitespace so a spacer-only cell is a blank cell. Shipped unreleased,
+  so no published version carried the mislabelling.
+
+### Changed
+
+- **Surfaces are named by SII artifact (ADR-024).** The MIPYME work landed under a
+  `factura` verb and was folded into `dte` before release: a factura is DTE 33, and the
+  artifact already had a verb. `portal/factura.ts` → `portal/dte-mipyme.ts`,
+  `tasks/factura.ts` → `tasks/dte.ts`. Nothing published ever exposed `factura`, so this
+  breaks no consumer. `ROADMAP.md` § "Where a new surface goes" is now the placement table
+  a new verb is checked against.
+
 ## 0.7.0 — 2026-08-31
 
 ### Breaking

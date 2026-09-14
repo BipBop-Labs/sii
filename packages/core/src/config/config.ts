@@ -14,6 +14,12 @@ export const HOSTS = {
   portal: 'https://www.sii.cl',
   /** SPA JSON facades (RCV / F29 / F22) live under this host. */
   portalApi: 'https://www4.sii.cl',
+  /** The newer SPA apps + their `/app/<name>-api/*` JSON facades — first the Carpeta
+   *  Tributaria (`/carpetatributaria/…` SPA over `/app/cte-api-carpetatributaria/{rut}/…`).
+   *  The `.sii.cl` session cookie SSO-carries, but every `cte-api` call answers 401 until
+   *  the app's own `GET /app/session/status?originalUrl=…` warm-up ran (observed
+   *  2026-09-11, #110). (#109 / #110) */
+  portalApp: 'https://www2.sii.cl',
   /** Legacy BHE/BTE consulta CGIs (boletas de honorarios). HTML skeleton filled
    *  client-side from inline JS maps; read via `PortalSession.goto`/`evaluate`, NOT
    *  the SDI-JSON facade. The `.sii.cl` session cookie SSO-carries here (observed
@@ -49,6 +55,15 @@ export const LOGIN_URL = `${HOSTS.login}${HOSTS.loginPath}`;
 
 /** Full server-side logout URL (host + path). The close redirects OFF this path. */
 export const LOGOUT_URL = `${HOSTS.login}${HOSTS.logoutPath}`;
+
+/** The www2 app page `sii auth login --www2` opens for the user to complete SII's OAuth login
+ *  (`/bifurcacion` → `/oauthsii-v1/` → `/app/session/create` → back here), and the `Referer` /
+ *  `originalUrl` the Carpeta SPA sends on its own calls. Observed 2026-09-11/12 (#110, ADR-026). */
+export const WWW2_APP_CARPETA = `${HOSTS.portalApp}/carpetatributaria/generarcteregular`;
+
+/** The www2 app-session close (the SPA's `$logout`: `/app/session/close?originalUrl=…`, from the
+ *  session library `chunk-vendors.659f67b1.js`, observed 2026-09-11). Best-effort on logout. */
+export const WWW2_SESSION_CLOSE_URL = `${HOSTS.portalApp}/app/session/close`;
 
 /** The keyring "service" every entry of this tool lives under; the account (`username`
  *  in keyring terms) is the RUT. Lives here — with the other environment constants —

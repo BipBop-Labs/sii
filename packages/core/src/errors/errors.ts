@@ -17,6 +17,12 @@ export class NotAuthenticatedError extends SiiError {}
  *  so a generic catch still treats it as "not authenticated". */
 export class SessionExpiredError extends NotAuthenticatedError {}
 
+/** The www2 APP SESSION (the second cookies-only layer `www2.sii.cl/app/*` needs — ADR-026) is
+ *  missing or expired: `/app/session/status` did not answer a session JSON. A subclass of
+ *  NotAuthenticated because the fix is a login (`sii auth login --www2`), never a retry — but
+ *  DISTINCT from `SessionExpiredError` (the classic Mi SII session may be perfectly alive). */
+export class Www2SessionError extends NotAuthenticatedError {}
+
 /** Browser login was not completed (timeout / window closed). No partial
  *  session is ever written. */
 export class LoginFailedError extends SiiError {}
@@ -29,6 +35,17 @@ export class CredentialNotFoundError extends SiiError {}
 
 /** Invalid user input: bad RUT, an operate target not in the operable set, etc. */
 export class ValidationError extends SiiError {}
+
+/** An authenticated `requestJson` got a body that is NOT JSON and NOT the login wall —
+ *  the response reached its destination host (no `LOGIN_HOST` bounce, not HTML) but the
+ *  body does not parse. Observed 2026-09-11 (GH-111) on the cte-api
+ *  `obtenerValorParametro` (URL cited in `adapters/node/response.ts`): HTTP 200
+ *  `text/plain;charset=utf-8` with a bare URL — a live session, a wrong endpoint. Carries
+ *  the endpoint, HTTP status, content-type and the first ~80 chars of the body VERBATIM
+ *  (ADR-004), so a facade can tell a SII quirk from a dead session (`SessionExpiredError`)
+ *  without a second round-trip. NOT a subclass of NotAuthenticated on purpose: re-login
+ *  would not fix it. */
+export class UnexpectedResponseError extends SiiError {}
 
 /** SII rejected a portal/SDI facade request (error envelope or unparseable
  *  response). Carries SII's message verbatim — never translated (ADR-004). */
@@ -72,3 +89,11 @@ export class PeticionesError extends SiiError {}
  *  changed shape. Empresa-keyed. Never retried after a SII error; a `LOGIN_HOST` bounce is
  *  `SessionExpiredError`, not this. */
 export class DteError extends SiiError {}
+
+/** SII rejected a Carpeta Tributaria (`cte-api`) request, the body was not the observed shape
+ *  ("scraper roto" — e.g. `/instituciones` not serving an array), the operation is invalid for
+ *  its session-keyed contract (a representing pointer, ADR-005), OR the user's `--institucion` is
+ *  not in SII's LIVE list (the message names the valid codes; no round-trip is spent). SII's
+ *  message verbatim where one exists — never translated (ADR-004). Never retried; a missing www2
+ *  app session is `Www2SessionError` and a `LOGIN_HOST` bounce `SessionExpiredError`, not this. */
+export class CarpetaError extends SiiError {}

@@ -37,6 +37,15 @@ Python `sii-cli`, adapted to TypeScript.
   `@albertomarturelo/sii-core` with Node default implementations; tests inject fakes so they
   never touch the real SII / keyring / clock. The core is otherwise a normal
   Node library (it may use Node APIs directly). (ADR-003)
+- **A seam only ONE surface may use is wired in THAT surface's composition root, never
+  as a `createNodeRuntime` default.** Both surfaces build from `createNodeRuntime()`, so a
+  default there hands the capability to the MCP server too. Keeping a task off the main
+  barrel controls which TASK the model can reach; it does NOT control which SEAM the
+  runtime carries — every barrel task receives `runtime`. The OS keyring is the template:
+  `packages/cli/src/main.ts` passes `secrets: new KeyringSecretStore()` explicitly,
+  `createNodeRuntime().secrets` is asserted `undefined` in both packages, and the type on
+  `Runtime` is the READ half only (`SecretReader`). "The MCP never reads the keyring" must
+  be true by construction, not because no code happens to call it. (ADR-006 / ADR-025)
 - **Authentication is an explicit verb, not a side-effect.** Domain tasks never
   mint a session; they consume a valid one or raise `NotAuthenticated`. Only the
   login task mints. (ported sii-py ADR-019)
@@ -84,6 +93,16 @@ Python `sii-cli`, adapted to TypeScript.
   authenticated JSON POST (the session cookies ride along), never a bespoke HTTP
   client. Cite the endpoint + observation date; surface the `respEstado` error
   envelope verbatim; curated + `raw`. (ADR-003 / ADR-004)
+  **A non-JSON body is classified by URL + content-type, never by "does the body look
+  useful".** `requestJson` resolves parsed JSON ONLY. A `LOGIN_HOST` landing or an HTML
+  body ⇒ `SessionExpiredError` (re-login fixes it). Anything else that fails to parse ⇒
+  `UnexpectedResponseError` carrying the endpoint, status, content-type and the first ~80
+  chars of the body verbatim — observed 2026-09-11 (#111): a LIVE session on the cte-api
+  `obtenerValorParametro` gets `200 text/plain` with a bare URL (the "modificar email"
+  SPA), which is not a dead session and must not read as one, and whose body is exactly
+  what tells you the endpoint is wrong. Never return the raw string from the seam: a bare
+  value would sail past the facade's zod envelope (ADR-011) and hide a broken endpoint;
+  the fix for such an endpoint is to call the RIGHT one, not to relax the seam.
 - **Inline-JS-map facades (legacy CGIs) go through `PortalSession.goto` + `evaluate`,
   NOT `requestJson`.** Some surfaces (BHE/BTE on `loa.sii.cl/cgi_IMT/`) serve an HTML
   skeleton whose tables are filled client-side from global JS maps (`xml_values`,
@@ -93,6 +112,16 @@ Python `sii-cli`, adapted to TypeScript.
   wrapper is REQUIRED (the maps are JS Arrays with string keys a bare read would drop).
   NEVER scrape the rendered DOM (the cells still hold the filling JS). Cite the CGI +
   observation date; pace pagination via `Clock.sleep`. (ADR-003 / ADR-004)
+- **An HTML table parser preserves blank cells, maps by POSITION, and fails loud on an
+  unexpected cell count.** Never drop empty cells before indexing: SII renders a legitimately
+  absent value as a blank cell (a `PRV` document has no folio), so filtering it slides every
+  later column one place left and yields a plausible row with the values under the wrong names —
+  no error, and `Number('2026-09-08')` ⇒ `NaN` ⇒ `null` in the JSON, so even the broken value
+  disappears. Read a blank cell (empty, a raw U+00A0, or `&nbsp;`) as `null`, and raise "scraper
+  roto" when the row's cell count is not EXACTLY the observed one — exactly, not a minimum,
+  because a blank cell BEFORE the first mapped column shifts the row just as badly as a dropped
+  one. `dte-public.ts` (`cell()`) is the template; `dte-mipyme.ts` `parseEmitidas` was fixed into
+  it (#92). (ADR-004)
 - **Unauthenticated public consultas go through `PortalDriver.requestPublic`.** A
   login-free CGI (DTE-authorized) is a cold, session-less, browser-free HTTP request
   (Node `fetch`, charset-aware) — not a `PortalSession`. Still a task + seam (audited),
@@ -191,7 +220,22 @@ Python `sii-cli`, adapted to TypeScript.
   the operate pointer, takes NO `--rut`, and always reads self; the empresa's data
   is reached by logging in AS the empresa (logout→login). Confirm reach live before
   wiring each session-keyed surface (F22 confirmed 2026-06-27). `rcv` is the body-RUT
-  template, `f22` the session-keyed one.
+  template, `f22` the session-keyed one. **A session-keyed task rejects a representing pointer
+  through the shared `assertOperatingSelf(runtime, mkError)` in `auth/session.ts`** (one check,
+  the surface supplies its own typed error + wording) — never a private copy; the third copy
+  (carpeta, #110) turned it into the helper. `f29`/`bte` still carry the older copies and migrate
+  on their next touch.
+- **`www2.sii.cl/app/*` surfaces need the www2 APP SESSION, a second cookies-only layer
+  (ADR-026).** The classic `.sii.cl` jar reaches www1/www3/www4/loa but NOT the `/app/<name>-api`
+  facades (bare 401). That layer is the httpOnly `.sii.cl` pair `X-SII-STATE-TYPE` + a state cookie `X-SII-STATE-<X>` (suffix varies), minted
+  ONLY by the user at SII's `oauthsii-v1` page (headed, reCAPTCHA — never headless, never over
+  MCP), persisted in the same session file. A www2 facade FIRST reads `GET /app/session/status`
+  (the SPA's own liveness read), keys every API path by its `userId` verbatim, and on a non-200
+  raises `Www2SessionError` (a `NotAuthenticated`, actionable: "run `sii auth login --www2`"),
+  never a warm-up retry. The read lives ONCE in `portal/www2-session.ts`; the layer is minted by
+  `sii auth login --www2` (a second headed cookies-only login at SII's OAuth page — never headless,
+  never over MCP as a password; merged into the same session file). `carpeta` is the template; the
+  wire findings are in `sii-contract/carpeta-tributaria.md` and `sii-contract/auth-login.md`.
 - **Three authorization modes, not two (ADR-023).** Besides *body-RUT* (RCV) and
   *session-keyed* (F22/F29/BHE), a surface can be **empresa-keyed**: the MIPYME facturación
   portal has its OWN authorized-empresa list (`mipeSelEmpresa.cgi` — the empresas that
@@ -289,9 +333,17 @@ Python `sii-cli`, adapted to TypeScript.
 - **One feature / work-unit per PR.** Don't bundle two distinct features even on
   the same branch — when a second feature emerges mid-branch, give it its own
   branch/PR (stacked if it depends on the first). Split BEFORE opening the PR.
+  For a FORK PR, "stacked" means SEQUENCED AFTER the first merge: the dependent
+  feature waits, then branches off the updated `main` — never two in one branch.
 - **Status docs go in a SEPARATE commit from feature code.** `ROADMAP.md`
   bookkeeping is its own commit; the feature commit carries code
   plus its tightly-coupled docs only (the ADR + any `sii-contract/*.md`).
+- **A squash merge's subject must carry the PR number.** Every commit on `main` ends with
+  `(#N)` — that is how a commit is traced back to its review. GitHub appends it automatically
+  only when it composes the subject itself; passing `gh pr merge --squash --subject "…"`
+  suppresses that, so **write the `(#N)` into the subject yourself**. The ≤72-char limit is on
+  the subject you author; the appended reference may push the final line past it, as the existing
+  history shows. (Learned by getting it wrong twice on the 0.10.0 work — ADR-007.)
 - **No AI attribution anywhere** — no `Co-Authored-By`, no "Generated with",
   no `🤖`, in any artifact that lands in git or on GitHub. Authorship is the
   human owner.
